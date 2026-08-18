@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Credit Card Teller",
+    "slug": "creditcardteller",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#0f172a"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sammy.creditcardteller",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Used to recommend the best card at nearby stores when app is open.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Used for optional geofence reminders at your favorite stores."
+      }
+    },
+    "android": {
+      "package": "com.sammy.creditcardteller",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-location",
+      "expo-notifications"
+    ]
+  }
+}

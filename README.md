@@ -1,49 +1,87 @@
-# Credit Card Teller MVP
+# Credit Card Teller
 
-Mobile app MVP that recommends which credit card to use at a merchant for maximum rewards, with optional geofence nudges for favorite locations.
+A local-first Expo app that answers one question fast — **which card do I use here?** — and shows its work. Optional geofence nudges remind you at stores you pin.
 
-## Implemented scope
+Nothing leaves your phone. There is no backend, no account and no bank connection.
 
-- Card templates for Costco Anywhere Visa and Apple Card.
-- Rules engine with explainable output (`best card`, `%`, and `why`).
-- In-store and online recommendation modes.
-- Payment method awareness (`Apple Pay`, `physical`, `online checkout`).
-- Favorites list (stores to monitor for optional geofence nudges).
-- Optional geofence automation toggle with permissions flow.
-- Anti-spam and quiet-hour gating for nudges.
-- User override per merchant.
-- Basic event logging (`accepted` vs `dismissed`).
-- Custom card editor (MVP-level: default base rate rule).
-
-## Product reality constraints reflected in code
-
-- Geofence automation is opt-in and limited to favorites only.
-- Reminders are gated by a minimum reward delta threshold and quiet hours.
-- Manual one-tap recommendation flow is always available with no heavy permissions.
-
-## Run locally
+## Quick start
 
 ```bash
 npm install
-npm run start
+npm run check    # typecheck + 49 unit tests
+npm start        # Expo dev server
 ```
 
-Open in iOS/Android simulator or Expo Go.
+Geofencing needs a development build (`npm run ios` / `npm run android`), not Expo Go, because background location requires the native permissions declared in `app.json`.
 
-## File map
+## How a recommendation is made
 
-- `App.tsx` - UI, state management, logging, overrides, and tab flows.
-- `src/engine/rewards.ts` - card scoring and explainable decision logic.
-- `src/data/seed.ts` - seed cards, merchants, and settings.
-- `src/services/geofence.ts` - geofence registration and nudge gating logic.
-- `src/services/storage.ts` - AsyncStorage helpers.
-- `src/types/domain.ts` - domain model types.
+Every card is scored down to a single **cash-equivalent effective rate**, so cards that earn in different currencies can be compared honestly. The pipeline, in order:
 
-## Future features
+1. **Acceptance.** If the merchant restricts networks (Costco only takes Visa), non-matching cards are marked ineligible with the reason, not silently ranked last.
+2. **Rule selection.** Among the card's rules that apply to this merchant, category, channel and payment method, the one with the **highest post-cap rate** wins. Specificity is only a tiebreaker.
+3. **Caps.** A capped bonus category checks the local spend ledger. Exhausted → the post-cap rate. Partially exhausted with a known amount → the rate is blended across both tiers (`$200 left of a $6,000 cap on a $1,000 purchase` → 2.0%, not 6%).
+4. **Point valuation.** Points and miles are multiplied by the card's `rewardUnitValue`, which defaults to the 1¢ cash-redemption floor so the app never overstates a card.
+5. **Foreign transaction fee.** Subtracted from the effective rate. A 3% earn on a card with a 3% fee correctly shows as a wash.
 
-- Stronger online purchase recommendations:
-  - Merchant normalization for checkout domains.
-  - Browser extension + share-sheet hooks for card hints at checkout.
-  - Partner merchant sync for cards like Apple Card and rotating bonus categories.
-- Better merchant detection confidence and fallback prompts when uncertain.
-- Offer/coupon stacking suggestions and card-linked offer awareness.
+The result carries a `factors` list — one entry per step above, with the rate delta it contributed — plus `caveats` for things the engine cannot model (annual fees, issuer category exclusions, Costco's annual certificate). That list is what the "Why" section renders.
+
+Ties are reported as ties. Overrides are honoured but the engine still says what it would have picked, and an override for a card the merchant rejects is skipped with an explanation.
+
+## Merchant matching
+
+Typed text, card-statement descriptors and checkout URLs all go through the same matcher, which returns a **confidence level** and the runners-up:
+
+| Input | Result |
+| --- | --- |
+| `SQ *TRADER JOES #204` | Trader Joe's — high (processor prefix and store number stripped) |
+| `https://www.costco.com/cart` | Costco.com — high (domain) |
+| `pavillions` | Pavilions — high (fuzzy) |
+| `blue bottl` (two similar stores) | ambiguous — both offered, user confirms |
+| `zzzqqx bodega` | no match — pick a category and still get a ranking |
+
+Anything below **high** asks for confirmation before you act on the rate. Confirming a spelling saves it as a learned alias, so the same descriptor is a one-tap match next time. An unknown store falls back to an ad-hoc merchant in a category you pick, so the flow never dead-ends.
+
+## Geofence nudges
+
+Off by default and limited to favorites you have pinned.
+
+1. Favorite a store on the **Places** tab.
+2. Stand in the store once and tap **Pin current location**. Seeded merchants ship without coordinates on purpose — a Costco in one city is not a Costco in another.
+3. Turn on **Geofence nudges** and grant location (Always) plus notifications.
+
+When you arrive, iOS wakes the app, which rebuilds cards, settings and throttle state from storage, runs the same engine the screen runs, and sends a notification naming the actual card and rate (`Use Citi Double Cash — 2%`). Tapping it opens that store's recommendation.
+
+A nudge is suppressed unless it clears every gate: feature enabled, a real winner, not a tie, wins by at least your threshold, outside quiet hours, past the global cooldown (45m default) and past the per-store cooldown (4h default). Throttle state is **persisted**, so a cold background launch cannot reset it. **Test nudge** on any pinned store dry-runs the exact background path without driving anywhere.
+
+## Card data
+
+Seeded cards: Costco Anywhere Visa, Apple Card, Chase Freedom Unlimited, Citi Double Cash, Amex Blue Cash Preferred.
+
+Each records `termsAsOf` and a `sourceNote`. **Issuers change reward terms — verify against your issuer before relying on a recommendation.** Rates are edited in `src/data/cards.ts`; the in-app editor adds flat-rate cards and adjusts point valuations.
+
+## Project layout
+
+```
+App.tsx                       screens, state and persistence wiring
+src/types/domain.ts           domain model
+src/data/cards.ts             seeded card terms
+src/data/merchants.ts         seeded merchants, aliases, domains, defaults
+src/engine/rewards.ts         scoring, caps, explanation
+src/engine/merchantMatch.ts   normalisation, fuzzy matching, confidence
+src/engine/spend.ts           cap ledger
+src/services/geofence.ts      regions, permissions, background task
+src/services/nudgePolicy.ts   anti-spam gating (pure, testable)
+src/services/schema.ts        validators for stored data
+src/services/storage.ts       versioned AsyncStorage access
+src/ui/                       theme and shared components
+tests/                        unit tests + a small zero-dependency runner
+```
+
+## Testing
+
+`npm test` compiles the pure modules with `tsc` and runs them on node — no mobile test runner needed. 49 tests cover rule selection, network acceptance, cap exhaustion and blending, foreign fees, point valuation, ties, overrides, text normalisation, match confidence, nudge gating and stored-data validation.
+
+## Status
+
+See [docs/STATUS.md](docs/STATUS.md) for what is verified working, what is known-limited, and what is not built yet.

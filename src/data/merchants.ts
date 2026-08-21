@@ -190,6 +190,253 @@ export const seedMerchants: Merchant[] = [
     aliases: ["marriott hotels", "marriott bonvoy"],
     domains: ["marriott.com"],
     supportsApplePay: false
+  },
+  {
+    id: "target",
+    name: "Target",
+    category: "department_store",
+    aliases: ["target store", "target com"],
+    domains: ["target.com"],
+    supportsApplePay: true,
+    radiusMeters: 120
+  },
+  {
+    id: "walmart",
+    name: "Walmart",
+    category: "department_store",
+    aliases: ["wal mart", "walmart supercenter", "wmt"],
+    domains: ["walmart.com"],
+    supportsApplePay: false,
+    radiusMeters: 150
+  },
+  {
+    id: "safeway",
+    name: "Safeway",
+    category: "grocery",
+    aliases: ["safeway store"],
+    domains: ["safeway.com"],
+    supportsApplePay: true,
+    radiusMeters: 90
+  },
+  {
+    id: "kroger",
+    name: "Kroger",
+    category: "grocery",
+    aliases: ["kroger store", "krogers"],
+    domains: ["kroger.com"],
+    supportsApplePay: true,
+    radiusMeters: 90
+  },
+  {
+    id: "ralphs",
+    name: "Ralphs",
+    category: "grocery",
+    aliases: ["ralphs grocery", "ralph s"],
+    domains: ["ralphs.com"],
+    supportsApplePay: true,
+    radiusMeters: 90
+  },
+  {
+    id: "sprouts",
+    name: "Sprouts Farmers Market",
+    category: "grocery",
+    aliases: ["sprouts", "sprouts market"],
+    domains: ["sprouts.com"],
+    supportsApplePay: true,
+    radiusMeters: 80
+  },
+  {
+    id: "aldi",
+    name: "Aldi",
+    category: "grocery",
+    aliases: ["aldi store"],
+    supportsApplePay: true,
+    radiusMeters: 80
+  },
+  {
+    id: "sams-club",
+    name: "Sam's Club",
+    category: "wholesale_club",
+    aliases: ["sams club", "sam club", "samsclub"],
+    domains: ["samsclub.com"],
+    supportsApplePay: true,
+    radiusMeters: 150
+  },
+  {
+    id: "bjs",
+    name: "BJ's Wholesale Club",
+    category: "wholesale_club",
+    aliases: ["bjs", "bjs wholesale", "bj s club"],
+    domains: ["bjs.com"],
+    supportsApplePay: true,
+    radiusMeters: 150
+  },
+  {
+    id: "chevron",
+    name: "Chevron",
+    category: "gas",
+    aliases: ["chevron gas", "chevron station"],
+    supportsApplePay: true,
+    radiusMeters: 60
+  },
+  {
+    id: "arco",
+    name: "ARCO",
+    category: "gas",
+    aliases: ["arco gas", "arco ampm"],
+    supportsApplePay: false,
+    radiusMeters: 60
+  },
+  {
+    id: "rite-aid",
+    name: "Rite Aid",
+    category: "drugstore",
+    aliases: ["riteaid", "rite aid pharmacy"],
+    domains: ["riteaid.com"],
+    supportsApplePay: true,
+    radiusMeters: 70
+  },
+  {
+    id: "subway",
+    name: "Subway",
+    category: "restaurant",
+    aliases: ["subway sandwiches"],
+    supportsApplePay: true,
+    radiusMeters: 60
+  },
+  {
+    id: "panera",
+    name: "Panera Bread",
+    category: "restaurant",
+    aliases: ["panera", "panera bread co"],
+    domains: ["panerabread.com"],
+    supportsApplePay: true,
+    radiusMeters: 60
+  },
+  {
+    id: "in-n-out",
+    name: "In-N-Out Burger",
+    category: "restaurant",
+    aliases: ["in n out", "innout", "in-n-out"],
+    supportsApplePay: false,
+    radiusMeters: 60
+  },
+  {
+    id: "taco-bell",
+    name: "Taco Bell",
+    category: "restaurant",
+    aliases: ["tacobell"],
+    supportsApplePay: true,
+    radiusMeters: 60
+  },
+  {
+    id: "sweetgreen",
+    name: "Sweetgreen",
+    category: "restaurant",
+    aliases: ["sweet green"],
+    domains: ["sweetgreen.com"],
+    supportsApplePay: true,
+    radiusMeters: 60
+  },
+  {
+    id: "dunkin",
+    name: "Dunkin'",
+    category: "restaurant",
+    aliases: ["dunkin donuts", "dunkin"],
+    supportsApplePay: true,
+    radiusMeters: 60
+  },
+  {
+    id: "doordash",
+    name: "DoorDash",
+    category: "restaurant",
+    aliases: ["door dash", "dd doordash"],
+    domains: ["doordash.com"],
+    supportsApplePay: true
+  },
+  {
+    id: "best-buy",
+    name: "Best Buy",
+    category: "department_store",
+    aliases: ["bestbuy", "best buy store"],
+    domains: ["bestbuy.com"],
+    supportsApplePay: true,
+    radiusMeters: 100
+  },
+  {
+    id: "lowes",
+    name: "Lowe's",
+    category: "home_improvement",
+    aliases: ["lowes", "lowes home improvement"],
+    domains: ["lowes.com"],
+    supportsApplePay: true,
+    radiusMeters: 120
+  },
+  {
+    id: "ikea",
+    name: "IKEA",
+    category: "home_improvement",
+    aliases: ["ikea store"],
+    domains: ["ikea.com"],
+    supportsApplePay: true,
+    radiusMeters: 150
+  },
+  {
+    id: "rei",
+    name: "REI",
+    category: "department_store",
+    aliases: ["rei co op", "recreational equipment"],
+    domains: ["rei.com"],
+    supportsApplePay: true,
+    radiusMeters: 90
+  },
+  {
+    id: "spotify",
+    name: "Spotify",
+    category: "streaming",
+    aliases: ["spotify usa", "spotify premium"],
+    domains: ["spotify.com"],
+    supportsApplePay: false
+  },
+  {
+    id: "hulu",
+    name: "Hulu",
+    category: "streaming",
+    aliases: ["hulu com"],
+    domains: ["hulu.com"],
+    supportsApplePay: false
+  },
+  {
+    id: "lyft",
+    name: "Lyft",
+    category: "transit",
+    aliases: ["lyft ride", "lyft inc"],
+    domains: ["lyft.com"],
+    supportsApplePay: true
+  },
+  {
+    id: "united",
+    name: "United Airlines",
+    category: "airline",
+    aliases: ["united", "united air", "ual"],
+    domains: ["united.com"],
+    supportsApplePay: false
+  },
+  {
+    id: "airbnb",
+    name: "Airbnb",
+    category: "travel",
+    aliases: ["air bnb", "airbnb inc"],
+    domains: ["airbnb.com"],
+    supportsApplePay: true
+  },
+  {
+    id: "hilton",
+    name: "Hilton",
+    category: "hotel",
+    aliases: ["hilton hotels", "hilton honors"],
+    domains: ["hilton.com"],
+    supportsApplePay: false
   }
 ];
 

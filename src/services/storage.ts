@@ -40,6 +40,7 @@ const key = (name: string): string => `cct.v${STORAGE_VERSION}.${name}`;
 
 export const storageKeys = {
   cards: key("cards"),
+  wallet: key("wallet"),
   merchants: key("merchants"),
   favorites: key("favorites"),
   decisions: key("decisions"),
@@ -95,7 +96,14 @@ export const clearAll = async (): Promise<void> => {
  * from storage.
  */
 export interface Snapshot {
+  /** Every card definition the app knows about, seeded plus user-created. */
   cards: Card[];
+  /**
+   * Ids of the cards the user actually holds, or null if they have not chosen
+   * yet. Only these are scored — recommending a card someone does not own is
+   * worse than no recommendation at all.
+   */
+  walletCardIds: string[] | null;
   merchants: Merchant[];
   favorites: string[];
   overrides: UserOverride[];
@@ -109,6 +117,7 @@ export interface Snapshot {
 export const loadSnapshot = async (): Promise<Snapshot> => {
   const [
     cards,
+    walletCardIds,
     merchants,
     favorites,
     overrides,
@@ -119,6 +128,7 @@ export const loadSnapshot = async (): Promise<Snapshot> => {
     nudgeState
   ] = await Promise.all([
     loadJson<Card[]>(storageKeys.cards, isCardArray),
+    loadJson<string[]>(storageKeys.wallet, isStringArray),
     loadJson<Merchant[]>(storageKeys.merchants, isMerchantArray),
     loadJson<string[]>(storageKeys.favorites, isStringArray),
     loadJson<UserOverride[]>(storageKeys.overrides, isOverrideArray),
@@ -131,6 +141,7 @@ export const loadSnapshot = async (): Promise<Snapshot> => {
 
   return {
     cards: cards?.length ? cards : seedCards,
+    walletCardIds,
     merchants: merchants?.length ? merchants : seedMerchants,
     favorites: favorites ?? [],
     overrides: overrides ?? [],
@@ -140,4 +151,18 @@ export const loadSnapshot = async (): Promise<Snapshot> => {
     decisions: decisions ?? [],
     nudgeState: nudgeState ?? emptyNudgeState
   };
+};
+
+/**
+ * The cards a recommendation should actually consider.
+ *
+ * Falls back to the whole catalogue only when the user has not picked a wallet
+ * yet, which the UI treats as "not onboarded".
+ */
+export const walletCards = (snapshot: Snapshot): Card[] => {
+  if (!snapshot.walletCardIds) {
+    return snapshot.cards;
+  }
+  const chosen = new Set(snapshot.walletCardIds);
+  return snapshot.cards.filter((card) => chosen.has(card.id));
 };

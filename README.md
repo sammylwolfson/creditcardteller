@@ -56,7 +56,7 @@ A nudge is suppressed unless it clears every gate: feature enabled, a real winne
 
 ## Card data
 
-Seeded cards: Costco Anywhere Visa, Apple Card, Chase Freedom Unlimited, Citi Double Cash, Amex Blue Cash Preferred.
+Seeded cards: Costco Anywhere Visa, Apple Card, Chase Freedom Unlimited, Citi Double Cash, Amex Blue Cash Preferred. Seeded merchants: 50, hand-curated (no paid API).
 
 Each records `termsAsOf` and a `sourceNote`. **Issuers change reward terms — verify against your issuer before relying on a recommendation.** Rates are edited in `src/data/cards.ts`; the in-app editor adds flat-rate cards and adjusts point valuations.
 
@@ -80,8 +80,17 @@ tests/                        unit tests + a small zero-dependency runner
 
 ## Testing
 
-`npm test` compiles the pure modules with `tsc` and runs them on node — no mobile test runner needed. 49 tests cover rule selection, network acceptance, cap exhaustion and blending, foreign fees, point valuation, ties, overrides, text normalisation, match confidence, nudge gating and stored-data validation.
+`npm test` compiles the pure modules with `tsc` and runs them on node — no mobile test runner needed. 56 tests cover rule selection, network acceptance, cap exhaustion and blending, foreign fees, point valuation, ties, overrides, text normalisation, match confidence, nudge gating, wallet scoping, catalogue integrity and stored-data validation.
 
-## Status
+## Your wallet vs. the catalogue
 
-See [docs/STATUS.md](docs/STATUS.md) for what is verified working, what is known-limited, and what is not built yet.
+The app ships with a **catalogue** of known card definitions. Your **wallet** is
+the subset you actually carry, chosen on the Wallet tab. Only wallet cards are
+ever ranked — recommending a card you do not hold is worse than no
+recommendation, so an empty wallet says so rather than guessing.
+
+## Docs
+
+- [docs/STATUS.md](docs/STATUS.md) — what is verified working, what is limited, what is not built.
+- [docs/SECURITY.md](docs/SECURITY.md) — security and privacy review, data model, validation.
+- [docs/RELEASE.md](docs/RELEASE.md) — App Store / Play Store checklist and cost breakdown.

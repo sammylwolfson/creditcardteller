@@ -7,7 +7,7 @@ import { matchByRegionId } from "../engine/merchantMatch";
 import { formatRate, recommend } from "../engine/rewards";
 import { Merchant } from "../types/domain";
 import { evaluateNudge, recordNudge } from "./nudgePolicy";
-import { loadSnapshot, saveJson, storageKeys } from "./storage";
+import { loadSnapshot, saveJson, storageKeys, walletCards } from "./storage";
 
 /**
  * Geofence nudges.
@@ -227,7 +227,7 @@ export const handleRegionEnter = async (
   }
 
   const result = recommend(
-    snapshot.cards,
+    walletCards(snapshot),
     {
       merchant,
       channel: "in_store",

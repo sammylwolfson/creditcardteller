@@ -14,11 +14,17 @@ import {
 
 import { seedCards } from "./src/data/cards";
 import { seedMerchants, seedSettings } from "./src/data/merchants";
-import { adHocMerchant, learnAlias, matchMerchant } from "./src/engine/merchantMatch";
+import {
+  adHocMerchant,
+  learnAlias,
+  matchMerchant,
+  normalizeText
+} from "./src/engine/merchantMatch";
 import { formatMoney, formatRate, recommend } from "./src/engine/rewards";
 import { pruneLedger, recordSpend } from "./src/engine/spend";
 import {
   captureCurrentLocation,
+  geofenceStatus,
   handleRegionEnter,
   PermissionReport,
   requestNudgePermissions,
@@ -73,7 +79,10 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("recommend");
   const [hydrated, setHydrated] = useState(false);
 
+  // `cards` is the catalogue of known card definitions; `walletCardIds` is what
+  // the user actually holds. Only wallet cards are ever scored.
   const [cards, setCards] = useState<Card[]>(seedCards);
+  const [walletCardIds, setWalletCardIds] = useState<string[] | null>(null);
   const [merchants, setMerchants] = useState<Merchant[]>(seedMerchants);
   const [favorites, setFavorites] = useState<string[]>([]);
   const [overrides, setOverrides] = useState<UserOverride[]>([]);
@@ -105,6 +114,15 @@ export default function App() {
   const [newCardName, setNewCardName] = useState("");
   const [newCardNetwork, setNewCardNetwork] = useState<Card["network"]>("Visa");
   const [newCardRate, setNewCardRate] = useState("1.5");
+  const [newCardAnnualFee, setNewCardAnnualFee] = useState("0");
+  const [newCardForeignFee, setNewCardForeignFee] = useState("0");
+  const [newCardBonusCategory, setNewCardBonusCategory] = useState<MerchantCategory | null>(null);
+  const [newCardBonusRate, setNewCardBonusRate] = useState("3");
+
+  // Geofence diagnostics.
+  const [geoStatus, setGeoStatus] = useState<{ taskRegistered: boolean; running: boolean } | null>(
+    null
+  );
 
   const hydratedRef = useRef(false);
 
@@ -112,6 +130,7 @@ export default function App() {
     const hydrate = async (): Promise<void> => {
       const snapshot = await loadSnapshot();
       setCards(snapshot.cards);
+      setWalletCardIds(snapshot.walletCardIds);
       setMerchants(snapshot.merchants);
       setFavorites(snapshot.favorites);
       setOverrides(snapshot.overrides);
@@ -137,6 +156,12 @@ export default function App() {
   }, []);
 
   useEffect(() => persist(storageKeys.cards, cards), [cards, persist]);
+  useEffect(() => {
+    // null means "not chosen yet"; do not write that over a real choice.
+    if (walletCardIds) {
+      persist(storageKeys.wallet, walletCardIds);
+    }
+  }, [walletCardIds, persist]);
   useEffect(() => persist(storageKeys.merchants, merchants), [merchants, persist]);
   useEffect(() => persist(storageKeys.favorites, favorites), [favorites, persist]);
   useEffect(() => persist(storageKeys.overrides, overrides), [overrides, persist]);
@@ -187,13 +212,23 @@ export default function App() {
     return favoriteMerchants[0] ?? merchants[0] ?? seedMerchants[0]!;
   }, [confirmedMerchantId, merchants, query, match, adHocCategory, favoriteMerchants]);
 
+  /** Only the cards the user holds. Unset wallet = not onboarded yet. */
+  const walletCards = useMemo(() => {
+    if (!walletCardIds) {
+      return cards;
+    }
+    const chosen = new Set(walletCardIds);
+    return cards.filter((card) => chosen.has(card.id));
+  }, [cards, walletCardIds]);
+
+  const needsOnboarding = walletCardIds != null && walletCards.length === 0;
   const isAdHoc = isAdHocId(activeMerchant.id);
   const amount = parseAmount(amountText);
 
   const result = useMemo(
     () =>
       recommend(
-        cards,
+        walletCards,
         {
           merchant: activeMerchant,
           channel,
@@ -204,7 +239,17 @@ export default function App() {
         },
         { overrides, ledger }
       ),
-    [cards, activeMerchant, channel, paymentMethod, amount, isForeign, viaPortal, overrides, ledger]
+    [
+      walletCards,
+      activeMerchant,
+      channel,
+      paymentMethod,
+      amount,
+      isForeign,
+      viaPortal,
+      overrides,
+      ledger
+    ]
   );
 
   const nudgePreview = useMemo(
@@ -327,6 +372,13 @@ export default function App() {
     void refreshGeofences(true, favoriteMerchants);
   }, [hydrated, settings.geofenceEnabled, favoriteMerchants, refreshGeofences]);
 
+  useEffect(() => {
+    if (tab !== "places") {
+      return;
+    }
+    void geofenceStatus().then(setGeoStatus);
+  }, [tab, syncResult]);
+
   const testNudge = async (merchantId: string): Promise<void> => {
     const outcome = await handleRegionEnter(merchantId);
     Alert.alert(
@@ -339,43 +391,132 @@ export default function App() {
     }
   };
 
+  const toggleWalletCard = (cardId: string): void => {
+    setWalletCardIds((prev) => {
+      const current = prev ?? [];
+      return current.includes(cardId)
+        ? current.filter((id) => id !== cardId)
+        : [...current, cardId];
+    });
+  };
+
   const addCustomCard = (): void => {
-    const rate = Number.parseFloat(newCardRate);
-    if (!newCardName.trim() || !Number.isFinite(rate) || rate < 0 || rate > 100) {
-      Alert.alert("Check the details", "A card needs a name and a base rate between 0 and 100%.");
+    const name = newCardName.trim();
+    const base = Number.parseFloat(newCardRate);
+    const fee = Number.parseFloat(newCardAnnualFee || "0");
+    const foreign = Number.parseFloat(newCardForeignFee || "0");
+    const bonus = Number.parseFloat(newCardBonusRate);
+
+    if (name.length === 0 || name.length > 60) {
+      Alert.alert("Check the name", "Give the card a nickname between 1 and 60 characters.");
+      return;
+    }
+    // A 13-19 digit run is almost certainly a real card number, which this app
+    // neither needs nor should ever store.
+    if (/\d[\d\s-]{11,}\d/.test(name)) {
+      Alert.alert(
+        "Do not enter a card number",
+        "This app only needs a nickname like \u201cChase Sapphire\u201d. It never asks for card numbers and cannot use one."
+      );
+      return;
+    }
+    if (!Number.isFinite(base) || base < 0 || base > 100) {
+      Alert.alert("Check the base rate", "The base reward rate must be between 0 and 100%.");
+      return;
+    }
+    if (!Number.isFinite(fee) || fee < 0 || fee > 10000) {
+      Alert.alert("Check the annual fee", "The annual fee must be between $0 and $10,000.");
+      return;
+    }
+    if (!Number.isFinite(foreign) || foreign < 0 || foreign > 100) {
+      Alert.alert("Check the foreign fee", "The foreign transaction fee must be between 0 and 100%.");
+      return;
+    }
+    if (newCardBonusCategory && (!Number.isFinite(bonus) || bonus < 0 || bonus > 100)) {
+      Alert.alert("Check the bonus rate", "The bonus rate must be between 0 and 100%.");
       return;
     }
 
     const id = `custom-${Date.now()}`;
+    const rules: Card["rewardRules"] = [];
+    if (newCardBonusCategory) {
+      rules.push({
+        id: `${id}-bonus`,
+        label: `${bonus}% on ${categoryLabels[newCardBonusCategory].toLowerCase()}`,
+        categories: [newCardBonusCategory],
+        rate: bonus / 100
+      });
+    }
+    rules.push({ id: `${id}-base`, label: `${base}% on everything else`, rate: base / 100 });
+
     setCards((prev) => [
       ...prev,
       {
         id,
-        name: newCardName.trim(),
-        shortName: newCardName.trim().slice(0, 18),
+        name,
+        shortName: name.slice(0, 18),
         network: newCardNetwork,
         rewardCurrency: "cash",
         rewardUnitValue: 1,
-        annualFee: 0,
-        foreignTransactionFee: 0,
+        annualFee: fee,
+        foreignTransactionFee: foreign / 100,
         isCustom: true,
-        rewardRules: [
-          { id: `${id}-base`, label: `${rate}% on everything`, rate: rate / 100 }
-        ]
+        rewardRules: rules
       }
     ]);
+    // A card you just added is a card you hold.
+    setWalletCardIds((prev) => [...(prev ?? []), id]);
+
     setNewCardName("");
     setNewCardRate("1.5");
+    setNewCardAnnualFee("0");
+    setNewCardForeignFee("0");
+    setNewCardBonusCategory(null);
+    setNewCardBonusRate("3");
   };
 
   const removeCard = (cardId: string): void => {
     setCards((prev) => prev.filter((card) => card.id !== cardId));
+    setWalletCardIds((prev) => (prev ?? []).filter((id) => id !== cardId));
     setOverrides((prev) => prev.filter((item) => item.cardId !== cardId));
   };
 
   const setPointValue = (cardId: string, value: number): void => {
     setCards((prev) =>
       prev.map((card) => (card.id === cardId ? { ...card, rewardUnitValue: value } : card))
+    );
+  };
+
+  /**
+   * Promotes the ad-hoc merchant behind the current search into the catalogue,
+   * so an unknown store only has to be identified once.
+   */
+  const saveUnknownStore = (): void => {
+    const name = query.trim();
+    if (name.length === 0 || name.length > 80) {
+      Alert.alert("Check the name", "Give the store a name between 1 and 80 characters.");
+      return;
+    }
+
+    const id = `user-${normalizeText(name).replace(/ /g, "-") || Date.now()}`;
+    if (merchants.some((merchant) => merchant.id === id)) {
+      Alert.alert("Already saved", "A store with that name is already in your list.");
+      return;
+    }
+
+    const merchant: Merchant = {
+      id,
+      name,
+      category: adHocCategory,
+      radiusMeters: 100,
+      isCustom: true
+    };
+    setMerchants((prev) => [...prev, merchant]);
+    setLearnedAliases((prev) => learnAlias(prev, name, id));
+    setConfirmedMerchantId(id);
+    Alert.alert(
+      "Store saved",
+      "It will match next time, and you can favorite and pin it on the Places tab."
     );
   };
 
@@ -389,6 +530,7 @@ export default function App() {
           void (async () => {
             await clearAll();
             setCards(seedCards);
+            setWalletCardIds([]);
             setMerchants(seedMerchants);
             setFavorites([]);
             setOverrides([]);
@@ -443,6 +585,14 @@ export default function App() {
 
       {tab === "recommend" && (
         <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+          {needsOnboarding ? (
+            <Banner
+              tone="warning"
+              title="Add your cards first"
+              body="Your wallet is empty, so there is nothing to compare. Open the Wallet tab and tick the cards you actually carry."
+            />
+          ) : null}
+
           <Section label="Where are you?">
             <TextInput
               style={styles.input}
@@ -492,6 +642,11 @@ export default function App() {
                   }))}
                   selectedId={adHocCategory}
                   onSelect={(id) => setAdHocCategory(id as MerchantCategory)}
+                />
+                <Button
+                  label="Save this store"
+                  variant="secondary"
+                  onPress={saveUnknownStore}
                 />
               </>
             ) : null}
@@ -709,6 +864,13 @@ export default function App() {
               />
             ) : null}
 
+            {settings.geofenceEnabled && geoStatus ? (
+              <Text style={styles.faintText}>
+                Background task {geoStatus.taskRegistered ? "registered" : "NOT registered"} ·
+                monitoring {geoStatus.running ? "active" : "inactive"}
+              </Text>
+            ) : null}
+
             {settings.geofenceEnabled && syncResult ? (
               <Banner
                 tone={syncResult.started ? "positive" : "warning"}
@@ -809,12 +971,28 @@ export default function App() {
 
       {tab === "cards" && (
         <ScrollView contentContainerStyle={styles.page}>
-          <Section label={`Your wallet (${cards.length})`}>
-            {cards.map((card) => (
-              <View key={card.id} style={styles.listItem}>
+          {needsOnboarding ? (
+            <Banner
+              tone="warning"
+              title="Pick the cards you carry"
+              body="Only the cards switched on below are compared. Leaving a card off means it is never recommended."
+            />
+          ) : null}
+
+          <Section label={`Cards you carry (${walletCards.length} of ${cards.length})`}>
+            {cards.map((card) => {
+              const inWallet = walletCardIds == null || walletCardIds.includes(card.id);
+              return (
+              <View
+                key={card.id}
+                style={[styles.listItem, inWallet && styles.listItemActive]}
+              >
                 <View style={styles.spread}>
-                  <Text style={{ fontWeight: "700", color: colors.ink, flex: 1 }}>{card.name}</Text>
-                  <Text style={styles.faintText}>{card.network}</Text>
+                  <View style={styles.grow}>
+                    <Text style={{ fontWeight: "700", color: colors.ink }}>{card.name}</Text>
+                    <Text style={styles.faintText}>{card.network}</Text>
+                  </View>
+                  <Switch value={inWallet} onValueChange={() => toggleWalletCard(card.id)} />
                 </View>
                 <Text style={styles.faintText}>
                   {card.annualFee > 0 ? `${formatMoney(card.annualFee)}/yr` : "No annual fee"} ·{" "}
@@ -859,16 +1037,21 @@ export default function App() {
                   </Pressable>
                 ) : null}
               </View>
-            ))}
+              );
+            })}
           </Section>
 
-          <Section label="Add a card">
+          <Section label="Add a card the app does not know">
             <TextInput
               style={styles.input}
-              placeholder="Card name"
+              placeholder="Nickname, e.g. Chase Sapphire"
+              maxLength={60}
               value={newCardName}
               onChangeText={setNewCardName}
             />
+            <Text style={styles.faintText}>
+              A nickname only. This app never asks for a card number and cannot use one.
+            </Text>
             <ChipPicker
               options={["Visa", "Mastercard", "American Express", "Discover"].map((network) => ({
                 id: network,
@@ -877,16 +1060,61 @@ export default function App() {
               selectedId={newCardNetwork}
               onSelect={(id) => setNewCardNetwork(id as Card["network"])}
             />
-            <TextInput
-              style={styles.input}
-              placeholder="Base reward %"
-              keyboardType="decimal-pad"
-              value={newCardRate}
-              onChangeText={setNewCardRate}
+            <View style={styles.row}>
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Base reward %"
+                keyboardType="decimal-pad"
+                maxLength={6}
+                value={newCardRate}
+                onChangeText={setNewCardRate}
+              />
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Annual fee $"
+                keyboardType="decimal-pad"
+                maxLength={7}
+                value={newCardAnnualFee}
+                onChangeText={setNewCardAnnualFee}
+              />
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Foreign fee %"
+                keyboardType="decimal-pad"
+                maxLength={5}
+                value={newCardForeignFee}
+                onChangeText={setNewCardForeignFee}
+              />
+            </View>
+
+            <Text style={styles.faintText}>Bonus category (optional)</Text>
+            <ChipPicker
+              options={[
+                { id: "none", label: "No bonus" },
+                ...merchantCategories.map((category) => ({
+                  id: category,
+                  label: categoryLabels[category]
+                }))
+              ]}
+              selectedId={newCardBonusCategory ?? "none"}
+              onSelect={(id) =>
+                setNewCardBonusCategory(id === "none" ? null : (id as MerchantCategory))
+              }
             />
+            {newCardBonusCategory ? (
+              <TextInput
+                style={styles.input}
+                placeholder="Bonus rate %"
+                keyboardType="decimal-pad"
+                maxLength={6}
+                value={newCardBonusRate}
+                onChangeText={setNewCardBonusRate}
+              />
+            ) : null}
+
             <Text style={styles.faintText}>
-              Custom cards start with a flat base rate. Bonus categories and caps are edited in
-              src/data/cards.ts for now.
+              Spending caps and payment-method conditions are not editable here yet; those live in
+              src/data/cards.ts.
             </Text>
             <Button label="Add to wallet" onPress={addCustomCard} />
           </Section>

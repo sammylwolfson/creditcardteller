@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-21.
+Last updated: 2026-08-21 (second pass).
 
 Honest accounting of what is working, what is limited, and what has not been built.
 
@@ -25,10 +25,35 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 | Nudge gating: threshold, quiet hours (incl. overnight wrap), global and per-store cooldowns, ties | Working | Tested, including a persisted-state round trip |
 | Spend ledger: period buckets, headroom, pruning, junk input | Working | Tested |
 | Stored-data validation rejects v1 records and corrupt JSON | Working | Tested |
-| App compiles and bundles | Working | `tsc --noEmit` clean; `expo export --platform ios` bundles 705 modules |
+| Wallet scoping: only held cards are ranked | Working | Tested — a card outside the wallet never appears; empty wallet returns no winner |
+| Expanded merchant catalogue integrity | Working | Tested — unique ids, no superstore miscategorisation, Costco network rule intact, valid domains |
+| App compiles and bundles | Working | `tsc --noEmit` clean; `expo export --platform ios` bundles cleanly |
 | Native config for background geofencing | Working | `expo config --type prebuild` resolves all three plugins, `UIBackgroundModes: ["location"]`, and Android background-location permissions |
 
-## Fixed this week
+## Fixed in the consolidation pass
+
+- **The app recommended cards you may not own.** All five seeded cards were
+  always scored. There is now a catalogue/wallet split: only cards the user has
+  switched on are ranked, in the UI and in the background geofence path alike.
+  An empty wallet says so instead of inventing an answer.
+- **Unknown stores were a dead end.** An unmatched search can now be saved into
+  the merchant catalogue, learned as an alias, then favorited and pinned.
+- **Custom cards were flat-rate only.** The editor now takes a network, base
+  rate, annual fee, foreign transaction fee and one bonus category, all
+  validated.
+- **No card-number guard.** The nickname field now rejects 13+ digit runs and
+  explains why, so a pasted card number cannot reach storage.
+- **`geofenceStatus` was dead code.** It is now surfaced in the Places tab as a
+  live "task registered / monitoring active" line, which is the fastest way to
+  tell whether geofencing is really running.
+- **Seed merchants went from 21 to 50**, with superstores and warehouse clubs
+  deliberately kept out of the `grocery` category so they do not wrongly earn
+  supermarket bonus rates.
+- **No app icon or splash existed**, which blocks a store build. Placeholder art
+  is generated and wired into `app.json`, along with `scheme`, `buildNumber`,
+  `versionCode`, adaptive icon and export-compliance declaration.
+
+## Fixed in the first pass
 
 - **Specificity beat rate.** The old engine sorted a card's matching rules by specificity first, so a 1% merchant-specific rule shadowed a 5% category rule on the same card. Now the highest post-cap rate wins and specificity is only a tiebreaker.
 - **In-memory nudge throttle.** The 45-minute throttle lived in a module variable, which reset every time iOS relaunched the app for a region event — exactly when it needed to hold. It is now persisted and gated on a per-store cooldown too.
@@ -48,8 +73,9 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 - **No rotating quarterly categories.** Chase Freedom Flex and Discover-style 5% rotations are not modelled; the rule schema has no activation or quarter concept.
 - **Apple Card's 3% partner list is static** and hardcoded to five merchants. Apple changes it and there is no sync.
 - **Category coverage is coarse.** One category per merchant, 15 categories, US-centric. Amex's supermarket exclusions (superstores, warehouse clubs) are a caveat string, not a rule.
-- **Custom cards are flat-rate only.** The in-app editor cannot add bonus categories, caps or conditions; those need editing `src/data/cards.ts`.
-- **The merchant catalogue is 21 entries.** Unknown stores work via the ad-hoc category fallback but are not saved for reuse.
+- **Custom cards support one bonus category.** Caps, payment-method conditions and multiple bonus tiers still need editing `src/data/cards.ts`.
+- **The merchant catalogue is 50 entries** and US-centric. Unknown stores can now be saved, but there is no shared or imported source.
+- **Icons and splash are placeholder art.** They build and look deliberate, but they are not a brand. See `docs/RELEASE.md`.
 - **Favoriting an online-only merchant** (Costco.com) will list it as "not pinned" in the geofence sync summary, which is accurate but noisy.
 - **No UI tests.** Components are unverified beyond typechecking and a successful bundle; all tests target the pure modules.
 - **Upgrading storage discards old data.** v1 records are rejected rather than migrated. That is deliberate — a wrong rate is worse than a reset — but it means an upgrade loses history.
@@ -65,6 +91,14 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 ## Suggested next steps
 
 1. Run the geofence path on hardware end to end, then delete the caveat above.
-2. Add rotating-category support (an `activeQuarters` condition plus an activation reminder) — the biggest missing modelling feature for common cards.
-3. Let a matched-but-unknown merchant be saved to the catalogue from the recommend screen, so the ad-hoc fallback compounds into coverage.
-4. Amortise annual fees behind a toggle, using logged spend to estimate a break-even.
+   Everything else is downstream of this working.
+2. Replace the placeholder icon and splash before any store submission.
+3. Add rotating-category support (an `activeQuarters` condition plus an
+   activation reminder) — the biggest missing modelling feature for common cards.
+4. Amortise annual fees behind a toggle, using logged spend to estimate a
+   break-even.
+5. Add CI (`npm run check` on pull requests); there is currently no automated
+   gate on any push.
+
+See also `docs/SECURITY.md` for the security review and `docs/RELEASE.md` for the
+store-submission checklist and cost breakdown.

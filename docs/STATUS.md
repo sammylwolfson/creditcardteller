@@ -88,17 +88,80 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 - Multi-card split strategies for a single basket.
 - Any sync, export or backup. Reinstalling the app loses everything.
 
-## Suggested next steps
+## Backlog
 
-1. Run the geofence path on hardware end to end, then delete the caveat above.
-   Everything else is downstream of this working.
-2. Replace the placeholder icon and splash before any store submission.
-3. Add rotating-category support (an `activeQuarters` condition plus an
-   activation reminder) — the biggest missing modelling feature for common cards.
-4. Amortise annual fees behind a toggle, using logged spend to estimate a
-   break-even.
-5. Add CI (`npm run check` on pull requests); there is currently no automated
-   gate on any push.
+The Linear project (`Credit Card Teller`) is at the workspace's **free issue
+limit**, so it holds the brief but cannot accept issues without a paid upgrade.
+Since keeping costs at zero is an explicit project constraint, the backlog lives
+here instead. Move it to Linear if that workspace is ever upgraded.
+
+### P1 — Verify geofencing end to end on a physical device
+
+The differentiator, and the least-verified part of the app. The logic is unit
+tested and both platforms bundle, but **no real region entry has ever been
+observed on hardware**. Everything else is downstream of this working. Cannot be
+tested in Expo Go; needs a development build.
+
+1. `eas build --profile development --platform ios` (or `npm run ios`).
+2. Wallet tab: switch on the cards you carry.
+3. Places tab: favorite a store, stand in it, tap **Pin current location**.
+4. Enable geofence nudges; grant location "Always" plus notifications.
+5. Tap **Test nudge** — dry-runs the exact background path.
+6. Leave and return; confirm entry fires with the app backgrounded *and* fully
+   closed.
+
+Watch for: the "task registered / monitoring active" line in Places; whether the
+cold-start path names the right card (it rebuilds from storage with no React
+state); whether the persisted throttle holds across a relaunch; and the real
+delay between crossing the boundary and the notification.
+
+### P2 — Prepare the background-location store justification
+
+The likeliest source of rejection, and worth preparing before the first
+submission rather than after the first rejection. Needs: a hosted privacy policy
+URL (both stores require one; `docs/SECURITY.md` is the substance), written
+reviewer notes, a demo video of the pin → arrive → notify flow, Apple's App
+Privacy questionnaire, and Play's data-safety plus background-location
+declarations. Blocked by P1 — the video needs a working build. Detail in
+`docs/RELEASE.md`.
+
+### P2 — Replace the placeholder icon and splash
+
+`assets/*.png` are generated placeholders. They build and look deliberate but
+are not a brand. Keep `icon.png` opaque; Apple rejects icons with alpha.
+
+### P3 — Re-verify card reward terms
+
+Rates are a hand-checked snapshot stamped `2026-08`. Re-confirm against issuer
+sites before anyone but the author relies on them, and refresh `termsAsOf`.
+
+### P3 — Rotating quarterly categories
+
+The biggest missing modelling feature for common cards (Chase Freedom Flex,
+Discover it). Needs an `activeQuarters` condition on `RewardRule` plus an
+activation reminder, since unactivated quarters earn the base rate.
+
+### P3 — Add CI
+
+There is no automated gate on any push. A GitHub Actions workflow running
+`npm run check` on pull requests would cost nothing and catch regressions.
+
+### P4 — Amortise annual fees behind a toggle
+
+The Blue Cash Preferred's $95 fee is a caveat, not part of the rate, which
+slightly favours fee cards at the purchase level. Logged spend could estimate a
+break-even.
+
+### Open questions from the project brief
+
+- **Merchant data source.** Currently 50 hand-curated entries plus user-saved
+  stores. A paid places API would improve coverage but breaks the zero-cost
+  constraint. The ad-hoc "save this store" path is the free alternative and
+  compounds with use — worth measuring before paying for anything.
+- **Store detection accuracy.** Geofence radii are per-merchant guesses
+  (60–150m) and unvalidated in the field. P1 will produce the first real data.
+- **Monetization.** Undecided. Nothing in the current architecture forecloses
+  any option, and nothing depends on deciding now.
 
 See also `docs/SECURITY.md` for the security review and `docs/RELEASE.md` for the
 store-submission checklist and cost breakdown.

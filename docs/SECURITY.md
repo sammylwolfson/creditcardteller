@@ -77,7 +77,9 @@ before pinning a home address as a "store".
 | Purchase amount | Non-numeric characters stripped; must parse positive and finite |
 | Saved store name | 1–80 characters; duplicate ids rejected |
 | Spend ledger entries | Non-finite and non-positive amounts discarded |
-| Anything read from storage | Shape-validated per record type; invalid data is ignored and seeds are used |
+| Assumed annual spend | Chosen from a fixed chip list, never free text; a zero estimate disables amortisation rather than dividing by zero |
+| Quarterly activation | A boolean toggle per rule, stored per quarter; no free input |
+| Anything read from storage | Shape-validated per record type, including the activation ledger; invalid data is ignored and seeds are used |
 
 Stored data is treated as untrusted on read. `src/services/schema.ts` validates
 every record type, so corrupt JSON, a hand-edited file or a stale v1 record

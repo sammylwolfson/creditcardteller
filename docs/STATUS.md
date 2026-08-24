@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-21 (second pass).
+Last updated: 2026-08-24 (third pass).
 
 Honest accounting of what is working, what is limited, and what has not been built.
 
@@ -26,6 +26,10 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 | Spend ledger: period buckets, headroom, pruning, junk input | Working | Tested |
 | Stored-data validation rejects v1 records and corrupt JSON | Working | Tested |
 | Wallet scoping: only held cards are ranked | Working | Tested — a card outside the wallet never appears; empty wallet returns no winner |
+| Rotating quarterly categories | Working | Tested — out-of-quarter rules are inert, unactivated quarters earn the base rate with a factor saying so, activation unlocks 5%, the $1,500 quarterly cap and its blending still apply |
+| Quarterly activation ledger | Working | Tested — per-quarter keys, idempotent activation, deactivation, pruning to the current quarter |
+| Annual fee amortisation (opt-in) | Working | Tested — off by default the fee stays a caveat; on, it is spread across assumed spend and deducted, with a zero-spend guard |
+| CI gate | Working | `.github/workflows/check.yml` runs `npm run check` on pushes and PRs to main and develop |
 | Expanded merchant catalogue integrity | Working | Tested — unique ids, no superstore miscategorisation, Costco network rule intact, valid domains |
 | App compiles and bundles | Working | `tsc --noEmit` clean; `expo export --platform ios` bundles cleanly |
 | Native config for background geofencing | Working | `expo config --type prebuild` resolves all three plugins, `UIBackgroundModes: ["location"]`, and Android background-location permissions |
@@ -69,8 +73,18 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 - **Not tested on a physical device.** The geofence logic, permission flow and notification payload are unit-tested and the app bundles, but no real region entry has been observed on hardware. **Walk the Test nudge → pin → real arrival path once before trusting it.** This is the largest open risk.
 - **Card terms are a snapshot.** Rates are as of `2026-08` from public issuer terms and are not fetched or refreshed. Verify against your issuer.
 - **The cap ledger is manual.** Spend only counts when you enter an amount and tap "I used it". There is no bank feed, so the $6,000 supermarket cap is only as accurate as your logging.
-- **Annual fees are not amortised.** The Blue Cash Preferred's $95 fee appears as a caveat, not in the rate. Comparing a fee card to a free one at the purchase level slightly favours the fee card.
-- **No rotating quarterly categories.** Chase Freedom Flex and Discover-style 5% rotations are not modelled; the rule schema has no activation or quarter concept.
+- **The rotating category calendar is a placeholder.** The engine models
+  rotations correctly, but the quarter-to-category mapping seeded for Chase
+  Freedom Flex and Discover it is a plausible placeholder, **not** a
+  transcription of any published calendar. Issuers publish a new one each year.
+  Confirm the live categories and edit `rotatingQuarters` in
+  `src/data/cards.ts` before trusting a rotating recommendation.
+- **Activation is self-reported.** The app cannot know whether you actually
+  activated a quarter with the issuer; the Wallet toggle records what you tell
+  it. Getting this wrong overstates or understates the card by 4 points.
+- **Amortised fees depend on a guessed spend estimate.** The toggle divides the
+  annual fee by an assumed annual spend chosen from a chip list, not by real
+  logged spend. It is directionally right and off by default.
 - **Apple Card's 3% partner list is static** and hardcoded to five merchants. Apple changes it and there is no sync.
 - **Category coverage is coarse.** One category per merchant, 15 categories, US-centric. Amex's supermarket exclusions (superstores, warehouse clubs) are a caveat string, not a rule.
 - **Custom cards support one bonus category.** Caps, payment-method conditions and multiple bonus tiers still need editing `src/data/cards.ts`.
@@ -135,22 +149,23 @@ are not a brand. Keep `icon.png` opaque; Apple rejects icons with alpha.
 Rates are a hand-checked snapshot stamped `2026-08`. Re-confirm against issuer
 sites before anyone but the author relies on them, and refresh `termsAsOf`.
 
-### P3 — Rotating quarterly categories
+### P3 — Confirm the rotating category calendars
 
-The biggest missing modelling feature for common cards (Chase Freedom Flex,
-Discover it). Needs an `activeQuarters` condition on `RewardRule` plus an
-activation reminder, since unactivated quarters earn the base rate.
+Done: the engine models rotations, activation and quarterly caps, and both
+cards are seeded. Still open: the quarter-to-category mapping is a placeholder.
+Confirm each quarter against the issuer's published calendar and edit
+`rotatingQuarters` in `src/data/cards.ts`. This recurs every year.
 
-### P3 — Add CI
+### Done in the third pass
 
-There is no automated gate on any push. A GitHub Actions workflow running
-`npm run check` on pull requests would cost nothing and catch regressions.
-
-### P4 — Amortise annual fees behind a toggle
-
-The Blue Cash Preferred's $95 fee is a caveat, not part of the rate, which
-slightly favours fee cards at the purchase level. Logged spend could estimate a
-break-even.
+- **CI.** `.github/workflows/check.yml` runs `npm run check` on pushes and pull
+  requests to `main` and `develop`. This is the first automated gate the repo
+  has had.
+- **Rotating quarterly categories.** `activeQuarters` and `requiresActivation`
+  conditions on `RewardRule`, a per-quarter activation ledger, Wallet toggles,
+  and correct seeding for Chase Freedom Flex and Discover it.
+- **Annual fee amortisation.** Opt-in setting that spreads a card's annual fee
+  across an assumed year of spend and deducts it from every rate.
 
 ### Open questions from the project brief
 

@@ -46,8 +46,7 @@ suite("rewards engine", () => {
     const score = scoreCard(
       trap,
       { merchant: merchant("trader-joes"), channel: "in_store", paymentMethod: "physical_card" },
-      {},
-      NOW
+      { now: NOW }
     );
 
     assertEqual(score.appliedRuleId, "trap-category", "5% category rule should win");
@@ -130,8 +129,7 @@ suite("rewards engine", () => {
     const score = scoreCard(
       card("amex-blue-cash-preferred"),
       { merchant: merchant("pavilions"), channel: "in_store", paymentMethod: "apple_pay", amount: 1000 },
-      ledger,
-      NOW
+      { ledger, now: NOW }
     );
 
     // $200 left at 6%, the other $800 at 1% => 2.0% blended.
@@ -171,8 +169,7 @@ suite("rewards engine", () => {
     const score = scoreCard(
       transferrable,
       { merchant: merchant("home-depot"), channel: "in_store", paymentMethod: "physical_card" },
-      {},
-      NOW
+      { now: NOW }
     );
 
     assertClose(score.effectiveRate, 0.0225, "1.5% at 1.5x is 2.25%");

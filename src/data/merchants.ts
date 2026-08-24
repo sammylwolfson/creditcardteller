@@ -447,5 +447,8 @@ export const seedSettings: AppSettings = {
   globalCooldownMinutes: 45,
   perMerchantCooldownMinutes: 240,
   defaultPaymentMethod: "apple_pay",
-  geofenceEnabled: false
+  geofenceEnabled: false,
+  // Off by default: the amortised view is only as good as the spend estimate.
+  amortiseAnnualFees: false,
+  assumedAnnualSpend: 24000
 };

@@ -1,4 +1,5 @@
 import {
+  ActivationLedger,
   Card,
   CardScore,
   DecisionInput,
@@ -8,7 +9,7 @@ import {
   SpendLedger,
   UserOverride
 } from "../types/domain";
-import { remainingCap } from "./spend";
+import { isActivated, quarterOf, remainingCap } from "./spend";
 
 /**
  * The recommendation engine.
@@ -57,7 +58,7 @@ const specificity = (rule: RewardRule): number => {
   return 1;
 };
 
-const ruleApplies = (rule: RewardRule, input: DecisionInput): boolean => {
+const ruleApplies = (rule: RewardRule, input: DecisionInput, now: Date): boolean => {
   if (rule.merchantIds?.length && !rule.merchantIds.includes(input.merchant.id)) {
     return false;
   }
@@ -75,6 +76,11 @@ const ruleApplies = (rule: RewardRule, input: DecisionInput): boolean => {
       return false;
     }
     if (conditions.requiresIssuerPortal && !input.viaIssuerPortal) {
+      return false;
+    }
+    // Out-of-season rotating categories are not "this rule at a lower rate",
+    // they simply are not in play; the card falls through to its other rules.
+    if (conditions.activeQuarters && !conditions.activeQuarters.includes(quarterOf(now))) {
       return false;
     }
   }
@@ -102,17 +108,31 @@ interface AdjustedRule {
  * When a purchase amount is known and only part of it fits under the cap, the
  * rate is blended across the two tiers so the estimate stays honest.
  */
-const applyCaps = (
+const adjustRule = (
   card: Card,
   rule: RewardRule,
   input: DecisionInput,
   ledger: SpendLedger,
+  activations: ActivationLedger,
   now: Date
 ): AdjustedRule => {
   const factors: ScoreFactor[] = [
     { label: rule.label, detail: `Base earn rate ${formatRate(rule.rate)}`, deltaRate: rule.rate }
   ];
   const caveats: string[] = rule.note ? [rule.note] : [];
+
+  // A rotating category the cardholder has not activated pays the card's base
+  // rate. Surfacing that as a factor turns a silent loss into an action.
+  if (rule.conditions?.requiresActivation && !isActivated(activations, rule.id, now)) {
+    const unactivatedRate = baseRateFor(card);
+    factors.push({
+      label: "Not activated this quarter",
+      detail: `This quarter's bonus has to be activated with the issuer. Until you do, it earns the card's base ${formatRate(unactivatedRate)} instead of ${formatRate(rule.rate)}.`,
+      deltaRate: round(unactivatedRate - rule.rate)
+    });
+    // The cap belongs to the bonus rate, so it is irrelevant at base rate.
+    return { rule, rate: unactivatedRate, factors, caveats };
+  }
 
   if (!rule.caps) {
     return { rule, rate: rule.rate, factors, caveats };
@@ -155,14 +175,17 @@ const pickBestRule = (
   card: Card,
   input: DecisionInput,
   ledger: SpendLedger,
+  activations: ActivationLedger,
   now: Date
 ): AdjustedRule | null => {
-  const applicable = card.rewardRules.filter((rule) => ruleApplies(rule, input));
+  const applicable = card.rewardRules.filter((rule) => ruleApplies(rule, input, now));
   if (applicable.length === 0) {
     return null;
   }
 
-  const adjusted = applicable.map((rule) => applyCaps(card, rule, input, ledger, now));
+  const adjusted = applicable.map((rule) =>
+    adjustRule(card, rule, input, ledger, activations, now)
+  );
 
   // Highest post-cap rate wins. Specificity is only a tiebreaker, so a 6%
   // category rule is never shadowed by a 1% merchant-specific rule.
@@ -177,12 +200,23 @@ const pickBestRule = (
   return adjusted[0] ?? null;
 };
 
+export interface ScoreContext {
+  ledger?: SpendLedger;
+  activations?: ActivationLedger;
+  /** Amortise the annual fee across a year of spend, see AppSettings. */
+  amortiseAnnualFees?: boolean;
+  assumedAnnualSpend?: number;
+  now?: Date;
+}
+
 export const scoreCard = (
   card: Card,
   input: DecisionInput,
-  ledger: SpendLedger = {},
-  now: Date = new Date()
+  context: ScoreContext = {}
 ): CardScore => {
+  const ledger = context.ledger ?? {};
+  const activations = context.activations ?? {};
+  const now = context.now ?? new Date();
   const base = {
     cardId: card.id,
     cardName: card.name,
@@ -203,7 +237,7 @@ export const scoreCard = (
     };
   }
 
-  const picked = pickBestRule(card, input, ledger, now);
+  const picked = pickBestRule(card, input, ledger, activations, now);
   if (!picked) {
     return {
       ...base,
@@ -246,9 +280,21 @@ export const scoreCard = (
   }
 
   if (card.annualFee > 0) {
-    caveats.push(
-      `${formatMoney(card.annualFee)} annual fee is not amortised into this rate.`
-    );
+    const spend = context.assumedAnnualSpend ?? 0;
+    if (context.amortiseAnnualFees && spend > 0) {
+      const perDollar = round(card.annualFee / spend);
+      const adjusted = round(effective - perDollar);
+      factors.push({
+        label: "Annual fee, amortised",
+        detail: `${formatMoney(card.annualFee)} a year spread across ${formatMoney(spend)} of assumed spend costs ${formatRate(perDollar)} on every purchase.`,
+        deltaRate: round(-perDollar)
+      });
+      effective = adjusted;
+    } else {
+      caveats.push(
+        `${formatMoney(card.annualFee)} annual fee is not amortised into this rate.`
+      );
+    }
   }
 
   const estimatedValue =
@@ -322,6 +368,10 @@ export const normalizeInput = (input: DecisionInput): NormalizedInput => {
 export interface RecommendOptions {
   overrides?: UserOverride[];
   ledger?: SpendLedger;
+  /** Quarters the user has activated for rotating bonus categories. */
+  activations?: ActivationLedger;
+  amortiseAnnualFees?: boolean;
+  assumedAnnualSpend?: number;
   now?: Date;
 }
 
@@ -372,9 +422,19 @@ export const recommend = (
 ): Recommendation & { adjustments: string[] } => {
   const now = options.now ?? new Date();
   const { input, adjustments } = normalizeInput(rawInput);
-  const ledger = options.ledger ?? {};
+  const context: ScoreContext = {
+    ledger: options.ledger ?? {},
+    activations: options.activations ?? {},
+    ...(options.amortiseAnnualFees != null
+      ? { amortiseAnnualFees: options.amortiseAnnualFees }
+      : {}),
+    ...(options.assumedAnnualSpend != null
+      ? { assumedAnnualSpend: options.assumedAnnualSpend }
+      : {}),
+    now
+  };
 
-  const scored = cards.map((card) => scoreCard(card, input, ledger, now));
+  const scored = cards.map((card) => scoreCard(card, input, context));
 
   const eligible = scored
     .filter((score) => score.eligible)

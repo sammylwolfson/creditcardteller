@@ -21,7 +21,15 @@ import {
   normalizeText
 } from "./src/engine/merchantMatch";
 import { formatMoney, formatRate, recommend } from "./src/engine/rewards";
-import { pruneLedger, recordSpend } from "./src/engine/spend";
+import {
+  activateQuarter,
+  deactivateQuarter,
+  isActivated,
+  pruneActivations,
+  pruneLedger,
+  quarterOf,
+  recordSpend
+} from "./src/engine/spend";
 import {
   captureCurrentLocation,
   geofenceStatus,
@@ -36,6 +44,7 @@ import { clearAll, loadSnapshot, saveJson, storageKeys } from "./src/services/st
 import { Banner, Button, ChipPicker, Section, Toggle } from "./src/ui/components";
 import { colors, styles } from "./src/ui/theme";
 import {
+  ActivationLedger,
   AppSettings,
   Card,
   CardScore,
@@ -89,6 +98,7 @@ export default function App() {
   const [decisions, setDecisions] = useState<LoggedDecision[]>([]);
   const [settings, setSettings] = useState<AppSettings>(seedSettings);
   const [ledger, setLedger] = useState<SpendLedger>({});
+  const [activations, setActivations] = useState<ActivationLedger>({});
   const [learnedAliases, setLearnedAliases] = useState<Record<string, string>>({});
   const [nudgeState, setNudgeState] = useState<NudgeState>({
     lastNudgeAt: 0,
@@ -137,6 +147,7 @@ export default function App() {
       setDecisions(snapshot.decisions);
       setSettings(snapshot.settings);
       setLedger(pruneLedger(snapshot.ledger));
+      setActivations(pruneActivations(snapshot.activations));
       setLearnedAliases(snapshot.learnedAliases);
       setNudgeState(snapshot.nudgeState);
       hydratedRef.current = true;
@@ -168,6 +179,7 @@ export default function App() {
   useEffect(() => persist(storageKeys.decisions, decisions), [decisions, persist]);
   useEffect(() => persist(storageKeys.settings, settings), [settings, persist]);
   useEffect(() => persist(storageKeys.ledger, ledger), [ledger, persist]);
+  useEffect(() => persist(storageKeys.activations, activations), [activations, persist]);
   useEffect(() => persist(storageKeys.learnedAliases, learnedAliases), [learnedAliases, persist]);
 
   // Tapping a geofence notification should land on that store's answer.
@@ -237,7 +249,13 @@ export default function App() {
           isForeignTransaction: isForeign,
           viaIssuerPortal: viaPortal
         },
-        { overrides, ledger }
+        {
+          overrides,
+          ledger,
+          activations,
+          amortiseAnnualFees: settings.amortiseAnnualFees,
+          assumedAnnualSpend: settings.assumedAnnualSpend
+        }
       ),
     [
       walletCards,
@@ -248,7 +266,10 @@ export default function App() {
       isForeign,
       viaPortal,
       overrides,
-      ledger
+      ledger,
+      activations,
+      settings.amortiseAnnualFees,
+      settings.assumedAnnualSpend
     ]
   );
 
@@ -481,6 +502,12 @@ export default function App() {
     setOverrides((prev) => prev.filter((item) => item.cardId !== cardId));
   };
 
+  const toggleActivation = (ruleId: string): void => {
+    setActivations((prev) =>
+      isActivated(prev, ruleId) ? deactivateQuarter(prev, ruleId) : activateQuarter(prev, ruleId)
+    );
+  };
+
   const setPointValue = (cardId: string, value: number): void => {
     setCards((prev) =>
       prev.map((card) => (card.id === cardId ? { ...card, rewardUnitValue: value } : card))
@@ -537,6 +564,7 @@ export default function App() {
             setDecisions([]);
             setSettings(seedSettings);
             setLedger({});
+            setActivations({});
             setLearnedAliases({});
             setSyncResult(null);
           })();
@@ -1002,14 +1030,46 @@ export default function App() {
                   {card.termsAsOf ? ` · terms checked ${card.termsAsOf}` : ""}
                 </Text>
 
-                {card.rewardRules.map((rule) => (
-                  <Text key={rule.id} style={styles.smallText}>
-                    • {rule.label}
-                    {rule.caps
-                      ? ` (first ${formatMoney(rule.caps.amount)}/${rule.caps.period})`
-                      : ""}
-                  </Text>
-                ))}
+                {card.rewardRules.map((rule) => {
+                  const quarters = rule.conditions?.activeQuarters;
+                  // Out-of-season rotations are noise in the wallet list.
+                  if (quarters && !quarters.includes(quarterOf(new Date()))) {
+                    return null;
+                  }
+                  return (
+                    <Text key={rule.id} style={styles.smallText}>
+                      • {rule.label}
+                      {rule.caps
+                        ? ` (first ${formatMoney(rule.caps.amount)}/${rule.caps.period})`
+                        : ""}
+                    </Text>
+                  );
+                })}
+
+                {card.rewardRules
+                  .filter(
+                    (rule) =>
+                      rule.conditions?.requiresActivation &&
+                      rule.conditions.activeQuarters?.includes(quarterOf(new Date()))
+                  )
+                  .map((rule) => {
+                    const on = isActivated(activations, rule.id);
+                    return (
+                      <View key={`${rule.id}-activate`} style={styles.spread}>
+                        <View style={styles.grow}>
+                          <Text style={styles.smallText}>
+                            Activated for Q{quarterOf(new Date())}
+                          </Text>
+                          <Text style={styles.faintText}>
+                            {on
+                              ? "Earning the bonus rate."
+                              : "Not activated — this earns the base rate until you activate with the issuer."}
+                          </Text>
+                        </View>
+                        <Switch value={on} onValueChange={() => toggleActivation(rule.id)} />
+                      </View>
+                    );
+                  })}
 
                 {card.rewardCurrency !== "cash" ? (
                   <>
@@ -1117,6 +1177,43 @@ export default function App() {
               src/data/cards.ts.
             </Text>
             <Button label="Add to wallet" onPress={addCustomCard} />
+          </Section>
+
+          <Section label="Annual fees">
+            <View style={styles.spread}>
+              <View style={styles.grow}>
+                <Text style={styles.smallText}>Charge annual fees to every purchase</Text>
+                <Text style={styles.faintText}>
+                  Spreads each card&apos;s annual fee across a year of spend and subtracts it from
+                  the rate. Off by default, because at the single-purchase level a fee card
+                  otherwise looks better than it is.
+                </Text>
+              </View>
+              <Switch
+                value={settings.amortiseAnnualFees}
+                onValueChange={(value) =>
+                  setSettings((prev) => ({ ...prev, amortiseAnnualFees: value }))
+                }
+              />
+            </View>
+            {settings.amortiseAnnualFees ? (
+              <>
+                <Text style={styles.faintText}>Assumed spend per year</Text>
+                <ChipPicker
+                  options={[6000, 12000, 24000, 48000].map((amount) => ({
+                    id: String(amount),
+                    label: formatMoney(amount)
+                  }))}
+                  selectedId={String(settings.assumedAnnualSpend)}
+                  onSelect={(id) =>
+                    setSettings((prev) => ({ ...prev, assumedAnnualSpend: Number(id) }))
+                  }
+                />
+                <Text style={styles.faintText}>
+                  The lower your assumed spend, the more each fee costs per purchase.
+                </Text>
+              </>
+            ) : null}
           </Section>
 
           <Section label="Data">

@@ -1,4 +1,4 @@
-import { RewardCap, SpendLedger } from "../types/domain";
+import { ActivationLedger, Quarter, RewardCap, SpendLedger } from "../types/domain";
 
 /**
  * Spend tracking for capped bonus categories.
@@ -68,6 +68,68 @@ export const pruneLedger = (ledger: SpendLedger, at: Date = new Date()): SpendLe
     const kept = Object.entries(buckets).filter(([key]) => keep.has(key));
     if (kept.length > 0) {
       pruned[ruleId] = Object.fromEntries(kept);
+    }
+  }
+  return pruned;
+};
+
+/* --------------------------------------------------------------------------
+ * Rotating quarterly categories
+ * ----------------------------------------------------------------------- */
+
+/** Calendar quarter for a date, 1-indexed. */
+export const quarterOf = (at: Date): Quarter =>
+  (Math.floor(at.getMonth() / 3) + 1) as Quarter;
+
+/** Key a rotating rule's activation is recorded under, e.g. "2026-Q3". */
+export const activationKey = (at: Date): string => periodKey("quarter", at);
+
+export const isActivated = (
+  ledger: ActivationLedger,
+  ruleId: string,
+  at: Date = new Date()
+): boolean => (ledger[ruleId] ?? []).includes(activationKey(at));
+
+/** Returns a new ledger with this quarter marked activated for the rule. */
+export const activateQuarter = (
+  ledger: ActivationLedger,
+  ruleId: string,
+  at: Date = new Date()
+): ActivationLedger => {
+  const key = activationKey(at);
+  const current = ledger[ruleId] ?? [];
+  if (current.includes(key)) {
+    return ledger;
+  }
+  return { ...ledger, [ruleId]: [...current, key] };
+};
+
+/** Undo an activation, for when the user taps the toggle back off. */
+export const deactivateQuarter = (
+  ledger: ActivationLedger,
+  ruleId: string,
+  at: Date = new Date()
+): ActivationLedger => {
+  const key = activationKey(at);
+  const remaining = (ledger[ruleId] ?? []).filter((entry) => entry !== key);
+  if (remaining.length === 0) {
+    const { [ruleId]: _dropped, ...rest } = ledger;
+    return rest;
+  }
+  return { ...ledger, [ruleId]: remaining };
+};
+
+/** Drops activation records for quarters that have already passed. */
+export const pruneActivations = (
+  ledger: ActivationLedger,
+  at: Date = new Date()
+): ActivationLedger => {
+  const key = activationKey(at);
+  const pruned: ActivationLedger = {};
+  for (const [ruleId, keys] of Object.entries(ledger)) {
+    const kept = keys.filter((entry) => entry === key);
+    if (kept.length > 0) {
+      pruned[ruleId] = kept;
     }
   }
   return pruned;

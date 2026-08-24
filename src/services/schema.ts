@@ -1,4 +1,5 @@
 import {
+  ActivationLedger,
   AppSettings,
   Card,
   LoggedDecision,
@@ -79,3 +80,9 @@ export const isLedger = (value: unknown): value is SpendLedger => isRecord(value
 
 export const isAliasMap = (value: unknown): value is Record<string, string> =>
   isRecord(value) && Object.values(value).every((item) => typeof item === "string");
+
+export const isActivationLedger = (value: unknown): value is ActivationLedger =>
+  isRecord(value) &&
+  Object.values(value).every(
+    (entry) => Array.isArray(entry) && entry.every((key) => typeof key === "string")
+  );

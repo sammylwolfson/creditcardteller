@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { seedCards } from "../data/cards";
 import { seedMerchants, seedSettings } from "../data/merchants";
 import {
+  ActivationLedger,
   AppSettings,
   Card,
   LoggedDecision,
@@ -13,6 +14,7 @@ import {
 } from "../types/domain";
 import { emptyNudgeState } from "./nudgePolicy";
 import {
+  isActivationLedger,
   isAliasMap,
   isCardArray,
   isDecisionArray,
@@ -47,6 +49,7 @@ export const storageKeys = {
   overrides: key("overrides"),
   settings: key("settings"),
   ledger: key("ledger"),
+  activations: key("activations"),
   learnedAliases: key("learnedAliases"),
   nudgeState: key("nudgeState")
 };
@@ -109,6 +112,8 @@ export interface Snapshot {
   overrides: UserOverride[];
   settings: AppSettings;
   ledger: SpendLedger;
+  /** Rotating bonus quarters the user has activated with the issuer. */
+  activations: ActivationLedger;
   learnedAliases: Record<string, string>;
   decisions: LoggedDecision[];
   nudgeState: NudgeState;
@@ -123,6 +128,7 @@ export const loadSnapshot = async (): Promise<Snapshot> => {
     overrides,
     settings,
     ledger,
+    activations,
     learnedAliases,
     decisions,
     nudgeState
@@ -134,6 +140,7 @@ export const loadSnapshot = async (): Promise<Snapshot> => {
     loadJson<UserOverride[]>(storageKeys.overrides, isOverrideArray),
     loadJson<AppSettings>(storageKeys.settings, isSettings),
     loadJson<SpendLedger>(storageKeys.ledger, isLedger),
+    loadJson<ActivationLedger>(storageKeys.activations, isActivationLedger),
     loadJson<Record<string, string>>(storageKeys.learnedAliases, isAliasMap),
     loadJson<LoggedDecision[]>(storageKeys.decisions, isDecisionArray),
     loadJson<NudgeState>(storageKeys.nudgeState, isNudgeState)
@@ -147,6 +154,7 @@ export const loadSnapshot = async (): Promise<Snapshot> => {
     overrides: overrides ?? [],
     settings: { ...seedSettings, ...(settings ?? {}) },
     ledger: ledger ?? {},
+    activations: activations ?? {},
     learnedAliases: learnedAliases ?? {},
     decisions: decisions ?? [],
     nudgeState: nudgeState ?? emptyNudgeState

@@ -1,4 +1,4 @@
-import { Card } from "../types/domain";
+import { Card, MerchantCategory, RewardRule } from "../types/domain";
 
 /**
  * Seed card catalogue.
@@ -17,6 +17,48 @@ import { Card } from "../types/domain";
  */
 
 const TERMS_AS_OF = "2026-08";
+
+/**
+ * Rotating quarterly bonus categories.
+ *
+ * IMPORTANT: issuers publish a new calendar every year and announce each
+ * quarter shortly before it starts. The quarter-to-category mapping below is a
+ * *placeholder shaped like the real thing*, not a transcription of any
+ * published calendar — it uses the categories these programs perennially
+ * rotate through so the engine and UI can be exercised. Before relying on a
+ * recommendation, confirm the live categories with the issuer and edit the
+ * `categories` array for the quarter in question.
+ *
+ * The structure is what matters and is correct: 5% on the quarter's categories,
+ * capped at $1,500 of spend per quarter, dropping to 1% after, and paying only
+ * the base rate until the cardholder activates that quarter.
+ */
+const CONFIRM_CALENDAR =
+  "Placeholder category for this quarter. Issuers publish a new calendar each year, so confirm the live categories with the issuer before trusting this.";
+
+const rotatingQuarters: {
+  quarter: 1 | 2 | 3 | 4;
+  categories: MerchantCategory[];
+  label: string;
+}[] = [
+  { quarter: 1, categories: ["grocery", "drugstore"], label: "groceries and drugstores" },
+  { quarter: 2, categories: ["gas", "home_improvement"], label: "gas and home improvement" },
+  { quarter: 3, categories: ["restaurant", "entertainment"], label: "restaurants and entertainment" },
+  { quarter: 4, categories: ["online_retail", "department_store"], label: "online and department stores" }
+];
+
+/** Builds the four quarterly 5% rules for a rotating-category card. */
+const rotatingRules = (cardId: string, capAmount: number): RewardRule[] =>
+  rotatingQuarters.map(({ quarter, categories, label }) => ({
+    id: `${cardId}-rotating-q${quarter}`,
+    label: `5% on ${label} (Q${quarter} rotating)`,
+    categories,
+    rate: 0.05,
+    conditions: { activeQuarters: [quarter], requiresActivation: true },
+    caps: { amount: capAmount, period: "quarter", rateAfterCap: 0.01 },
+    note: CONFIRM_CALENDAR
+  }));
+
 
 export const seedCards: Card[] = [
   {
@@ -192,6 +234,68 @@ export const seedCards: Card[] = [
       },
       {
         id: "bcp-base",
+        label: "1% on everything else",
+        rate: 0.01
+      }
+    ]
+  },
+  {
+    id: "chase-freedom-flex",
+    name: "Chase Freedom Flex",
+    shortName: "Freedom Flex",
+    network: "Mastercard",
+    rewardCurrency: "points",
+    rewardUnitValue: 1,
+    annualFee: 0,
+    foreignTransactionFee: 0.03,
+    termsAsOf: TERMS_AS_OF,
+    sourceNote:
+      "Chase Freedom Flex pricing and terms. Earns Ultimate Rewards points, valued here at the 1 cent cash floor. The 5% rotating categories require activation each quarter and are capped at $1,500 of combined spend per quarter; the quarter-to-category mapping in this file is a placeholder and must be confirmed against Chase's published calendar.",
+    rewardRules: [
+      ...rotatingRules("chase-freedom-flex", 1500),
+      {
+        id: "flex-chase-travel",
+        label: "5% on travel booked through Chase Travel",
+        categories: ["travel", "hotel", "airline"],
+        rate: 0.05,
+        conditions: { requiresIssuerPortal: true },
+        note: "Only applies when the booking goes through the Chase Travel portal."
+      },
+      {
+        id: "flex-dining",
+        label: "3% on dining",
+        categories: ["restaurant"],
+        rate: 0.03
+      },
+      {
+        id: "flex-drugstore",
+        label: "3% at drugstores",
+        categories: ["drugstore"],
+        rate: 0.03
+      },
+      {
+        id: "flex-base",
+        label: "1% on everything else",
+        rate: 0.01
+      }
+    ]
+  },
+  {
+    id: "discover-it",
+    name: "Discover it Cash Back",
+    shortName: "Discover it",
+    network: "Discover",
+    rewardCurrency: "cash",
+    rewardUnitValue: 1,
+    annualFee: 0,
+    foreignTransactionFee: 0,
+    termsAsOf: TERMS_AS_OF,
+    sourceNote:
+      "Discover it Cash Back terms. The 5% rotating categories require activation each quarter and are capped at $1,500 of spend per quarter, then 1%. Discover's first-year Cashback Match effectively doubles the first year and is deliberately not modelled, because baking it in would overstate the card from year two. The quarter-to-category mapping in this file is a placeholder and must be confirmed against Discover's published calendar.",
+    rewardRules: [
+      ...rotatingRules("discover-it", 1500),
+      {
+        id: "discover-base",
         label: "1% on everything else",
         rate: 0.01
       }

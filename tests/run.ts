@@ -6,6 +6,7 @@ import "./nudgePolicy.test";
 import "./spend.test";
 import "./schema.test";
 import "./wallet.test";
+import "./quarterly.test";
 
 void runAll().then((failures) => {
   process.exitCode = failures > 0 ? 1 : 0;

@@ -233,7 +233,14 @@ export const handleRegionEnter = async (
       channel: "in_store",
       paymentMethod: snapshot.settings.defaultPaymentMethod
     },
-    { overrides: snapshot.overrides, ledger: snapshot.ledger, now }
+    {
+      overrides: snapshot.overrides,
+      ledger: snapshot.ledger,
+      activations: snapshot.activations,
+      amortiseAnnualFees: snapshot.settings.amortiseAnnualFees,
+      assumedAnnualSpend: snapshot.settings.assumedAnnualSpend,
+      now
+    }
   );
 
   const decision = evaluateNudge(

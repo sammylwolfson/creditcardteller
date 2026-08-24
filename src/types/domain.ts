@@ -70,11 +70,26 @@ export type CardNetwork = "Visa" | "Mastercard" | "American Express" | "Discover
 /** What a card pays out in. Used to convert a headline rate into cash value. */
 export type RewardCurrency = "cash" | "points" | "miles";
 
+/** Calendar quarter, 1-indexed. Q1 = Jan-Mar. */
+export type Quarter = 1 | 2 | 3 | 4;
+
 export interface RuleCondition {
   channel?: PurchaseChannel[];
   paymentMethod?: PaymentMethod[];
   /** Rule only applies to purchases booked through the issuer's own portal. */
   requiresIssuerPortal?: boolean;
+  /**
+   * Quarters this rule is live in, for rotating bonus categories like Chase
+   * Freedom Flex and Discover it. Outside these quarters the rule does not
+   * apply at all; the card falls through to its other rules.
+   */
+  activeQuarters?: Quarter[];
+  /**
+   * The issuer requires the cardholder to activate the quarter before the
+   * bonus rate applies. An unactivated quarter earns the card's base rate,
+   * which the engine reports as a missed opportunity rather than hiding.
+   */
+  requiresActivation?: boolean;
 }
 
 export interface RewardCap {
@@ -255,7 +270,25 @@ export interface UserOverride {
 /** Spend recorded against capped rules: ruleId -> periodKey -> dollars. */
 export type SpendLedger = Record<string, Record<string, number>>;
 
+/**
+ * Quarters the user has activated with the issuer: ruleId -> period keys.
+ *
+ * Rotating 5% categories pay the base rate until the cardholder activates,
+ * and activation is per quarter, so this has to be tracked per period rather
+ * than as a single boolean.
+ */
+export type ActivationLedger = Record<string, string[]>;
+
 export interface AppSettings {
+  /**
+   * Spread each card's annual fee across an assumed year of spend and subtract
+   * it from every rate. Off by default: at the single-purchase level a fee card
+   * otherwise looks better than it is, but the amortised view is only as good
+   * as the spend estimate below.
+   */
+  amortiseAnnualFees: boolean;
+  /** Annual spend assumed when amortising fees, in dollars. */
+  assumedAnnualSpend: number;
   /** Minimum effective-rate win required to fire a nudge, e.g. 0.01 = 1pt. */
   nudgeDeltaThreshold: number;
   /** Hour of day (0-23) quiet hours begin. */

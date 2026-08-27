@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-24 (third pass).
+Last updated: 2026-08-27 (fourth pass).
 
 Honest accounting of what is working, what is limited, and what has not been built.
 
@@ -29,6 +29,8 @@ Verification method is listed for each item. "Tested" means a unit test in `test
 | Rotating quarterly categories | Working | Tested — out-of-quarter rules are inert, unactivated quarters earn the base rate with a factor saying so, activation unlocks 5%, the $1,500 quarterly cap and its blending still apply |
 | Quarterly activation ledger | Working | Tested — per-quarter keys, idempotent activation, deactivation, pruning to the current quarter |
 | Annual fee amortisation (opt-in) | Working | Tested — off by default the fee stays a caveat; on, it is spread across assumed spend and deducted, with a zero-spend guard |
+| Issuer exclusions enforced as rules | Working | Tested — 4% gas does not pay at a warehouse-club fuel station, 6% supermarkets does not pay at a superstore, exclusions survive re-categorisation, and the excluded card stops winning |
+| Merchant trait integrity | Working | Tested — clubs and superstores are tagged, no grocery merchant is tagged as either, traits use a closed vocabulary |
 | CI gate | Working | `.github/workflows/check.yml` runs `npm run check` on pushes and PRs to main and develop |
 | Expanded merchant catalogue integrity | Working | Tested — unique ids, no superstore miscategorisation, Costco network rule intact, valid domains |
 | App compiles and bundles | Working | `tsc --noEmit` clean; `expo export --platform ios` bundles cleanly |
@@ -86,7 +88,14 @@ Verification method is listed for each item. "Tested" means a unit test in `test
   annual fee by an assumed annual spend chosen from a chip list, not by real
   logged spend. It is directionally right and off by default.
 - **Apple Card's 3% partner list is static** and hardcoded to five merchants. Apple changes it and there is no sync.
-- **Category coverage is coarse.** One category per merchant, 15 categories, US-centric. Amex's supermarket exclusions (superstores, warehouse clubs) are a caveat string, not a rule.
+- **Category coverage is coarse.** One category per merchant, 15 categories,
+  US-centric. Issuer exclusions are now enforced via merchant traits rather
+  than prose, but a merchant still belongs to exactly one category, so a store
+  that genuinely spans two (a supermarket with a fuel station) picks one.
+- **Traits on user-saved stores are self-reported.** The save flow asks whether
+  a store is a superstore, warehouse club or specialty shop, but nothing
+  verifies the answer. Getting it wrong reintroduces the exact
+  confidently-wrong-rate problem traits exist to prevent.
 - **Custom cards support one bonus category.** Caps, payment-method conditions and multiple bonus tiers still need editing `src/data/cards.ts`.
 - **The merchant catalogue is 50 entries** and US-centric. Unknown stores can now be saved, but there is no shared or imported source.
 - **Icons and splash are placeholder art.** They build and look deliberate, but they are not a brand. See `docs/RELEASE.md`.
@@ -155,6 +164,19 @@ Done: the engine models rotations, activation and quarterly caps, and both
 cards are seeded. Still open: the quarter-to-category mapping is a placeholder.
 Confirm each quarter against the issuer's published calendar and edit
 `rotatingQuarters` in `src/data/cards.ts`. This recurs every year.
+
+### Done in the fourth pass
+
+- **Issuer exclusions are enforced, not just disclosed.** `RuleCondition` gains
+  `excludesTraits` and `excludesMerchantIds`, and merchants carry a
+  `MerchantTrait` (`superstore` / `warehouse_club` / `specialty_store`). The two
+  exclusions that were prose notes — Costco Visa's 4% gas excluding warehouse
+  clubs, and Amex's 6% supermarkets excluding superstores, clubs and specialty
+  shops — are now conditions the engine applies. Traits are deliberately
+  separate from `category`, so the exclusion holds even if a merchant is
+  re-categorised or a user saves their own store under a matching category.
+- **The save-a-store flow asks what kind of store it is**, so a user-created
+  merchant can carry the trait the exclusion needs.
 
 ### Done in the third pass
 

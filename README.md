@@ -19,7 +19,7 @@ Geofencing needs a development build (`npm run ios` / `npm run android`), not Ex
 Every card is scored down to a single **cash-equivalent effective rate**, so cards that earn in different currencies can be compared honestly. The pipeline, in order:
 
 1. **Acceptance.** If the merchant restricts networks (Costco only takes Visa), non-matching cards are marked ineligible with the reason, not silently ranked last.
-2. **Rule selection.** Among the card's rules that apply to this merchant, category, channel and payment method, the one with the **highest post-cap rate** wins. Specificity is only a tiebreaker.
+2. **Rule selection.** Among the card's rules that apply to this merchant, category, channel and payment method, the one with the **highest post-cap rate** wins. Specificity is only a tiebreaker. Issuer exclusions are applied here: a bonus category that explicitly does not pay at superstores, warehouse clubs or specialty shops is dropped, whatever category the merchant carries.
 3. **Rotating quarters.** A rotating bonus category (Chase Freedom Flex, Discover it) only applies in its quarter. Inside its quarter it pays the base rate until you mark it activated, and the "Why" list says so rather than quietly under-earning.
 4. **Caps.** A capped bonus category checks the local spend ledger. Exhausted → the post-cap rate. Partially exhausted with a known amount → the rate is blended across both tiers (`$200 left of a $6,000 cap on a $1,000 purchase` → 2.0%, not 6%).
 5. **Point valuation.** Points and miles are multiplied by the card's `rewardUnitValue`, which defaults to the 1¢ cash-redemption floor so the app never overstates a card.
@@ -58,7 +58,7 @@ A nudge is suppressed unless it clears every gate: feature enabled, a real winne
 
 ## Card data
 
-Seeded cards: Costco Anywhere Visa, Apple Card, Chase Freedom Unlimited, Citi Double Cash, Amex Blue Cash Preferred, Chase Freedom Flex, Discover it Cash Back. Seeded merchants: 50, hand-curated (no paid API).
+Seeded cards: Costco Anywhere Visa, Apple Card, Chase Freedom Unlimited, Citi Double Cash, Amex Blue Cash Preferred, Chase Freedom Flex, Discover it Cash Back. Seeded merchants: 51, hand-curated (no paid API).
 
 Each records `termsAsOf` and a `sourceNote`. **Issuers change reward terms — verify against your issuer before relying on a recommendation.** Rates are edited in `src/data/cards.ts`; the in-app editor adds flat-rate cards and adjusts point valuations.
 
@@ -82,7 +82,7 @@ tests/                        unit tests + a small zero-dependency runner
 
 ## Testing
 
-`npm test` compiles the pure modules with `tsc` and runs them on node — no mobile test runner needed. `npm run check` (typecheck + tests) also runs in CI on every push and pull request. 73 tests cover rule selection, network acceptance, cap exhaustion and blending, foreign fees, point valuation, ties, overrides, text normalisation, match confidence, nudge gating, wallet scoping, rotating quarterly categories and activation, annual fee amortisation, catalogue integrity and stored-data validation.
+`npm test` compiles the pure modules with `tsc` and runs them on node — no mobile test runner needed. `npm run check` (typecheck + tests) also runs in CI on every push and pull request. 82 tests cover rule selection, network acceptance, cap exhaustion and blending, foreign fees, point valuation, ties, overrides, text normalisation, match confidence, nudge gating, wallet scoping, rotating quarterly categories and activation, annual fee amortisation, issuer exclusions, catalogue integrity and stored-data validation.
 
 ## Your wallet vs. the catalogue
 

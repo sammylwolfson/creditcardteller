@@ -83,6 +83,16 @@ const ruleApplies = (rule: RewardRule, input: DecisionInput, now: Date): boolean
     if (conditions.activeQuarters && !conditions.activeQuarters.includes(quarterOf(now))) {
       return false;
     }
+    // Issuer exclusions: a bonus category that explicitly does not pay at this
+    // kind of store, however the merchant happens to be categorised.
+    if (
+      conditions.excludesTraits?.some((trait) => input.merchant.traits?.includes(trait))
+    ) {
+      return false;
+    }
+    if (conditions.excludesMerchantIds?.includes(input.merchant.id)) {
+      return false;
+    }
   }
 
   return true;

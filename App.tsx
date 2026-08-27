@@ -53,6 +53,7 @@ import {
   Merchant,
   MerchantCategory,
   merchantCategories,
+  MerchantTrait,
   categoryLabels,
   NudgeState,
   PaymentMethod,
@@ -109,6 +110,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [confirmedMerchantId, setConfirmedMerchantId] = useState<string | null>(null);
   const [adHocCategory, setAdHocCategory] = useState<MerchantCategory>("other");
+  const [adHocTrait, setAdHocTrait] = useState<MerchantTrait | null>(null);
   const [channel, setChannel] = useState<PurchaseChannel>("in_store");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("apple_pay");
   const [amountText, setAmountText] = useState("");
@@ -535,12 +537,16 @@ export default function App() {
       id,
       name,
       category: adHocCategory,
+      // Traits drive issuer exclusions, so a mislabelled superstore would
+      // otherwise be promised a supermarket rate it will not pay.
+      ...(adHocTrait ? { traits: [adHocTrait] } : {}),
       radiusMeters: 100,
       isCustom: true
     };
     setMerchants((prev) => [...prev, merchant]);
     setLearnedAliases((prev) => learnAlias(prev, name, id));
     setConfirmedMerchantId(id);
+    setAdHocTrait(null);
     Alert.alert(
       "Store saved",
       "It will match next time, and you can favorite and pin it on the Places tab."
@@ -670,6 +676,22 @@ export default function App() {
                   }))}
                   selectedId={adHocCategory}
                   onSelect={(id) => setAdHocCategory(id as MerchantCategory)}
+                />
+                <Text style={styles.faintText}>
+                  What kind of store is it? Some cards refuse their bonus rate at
+                  superstores, warehouse clubs and specialty shops.
+                </Text>
+                <ChipPicker
+                  options={[
+                    { id: "none", label: "Ordinary store" },
+                    { id: "superstore", label: "Superstore" },
+                    { id: "warehouse_club", label: "Warehouse club" },
+                    { id: "specialty_store", label: "Specialty store" }
+                  ]}
+                  selectedId={adHocTrait ?? "none"}
+                  onSelect={(id) =>
+                    setAdHocTrait(id === "none" ? null : (id as MerchantTrait))
+                  }
                 />
                 <Button
                   label="Save this store"

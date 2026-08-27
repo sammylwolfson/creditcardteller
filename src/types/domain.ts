@@ -61,6 +61,17 @@ export const categoryLabels: Record<MerchantCategory, string> = {
   other: "Everything else"
 };
 
+/**
+ * Structural facts about a merchant that issuers write exclusions against.
+ *
+ * Issuers do not exclude by category — they exclude by *kind of store*. Amex
+ * pays 6% at supermarkets but not at a superstore that also sells groceries.
+ * Keeping this separate from `category` means the exclusion survives someone
+ * re-categorising a merchant, or saving their own store under a category that
+ * happens to match.
+ */
+export type MerchantTrait = "superstore" | "warehouse_club" | "specialty_store";
+
 export type PurchaseChannel = "in_store" | "online";
 
 export type PaymentMethod = "apple_pay" | "physical_card" | "online_checkout";
@@ -90,6 +101,14 @@ export interface RuleCondition {
    * which the engine reports as a missed opportunity rather than hiding.
    */
   requiresActivation?: boolean;
+  /**
+   * Merchant kinds this rule never pays at, even when the category matches.
+   * Turns prose like "superstores and warehouse clubs are excluded" into
+   * something the engine enforces instead of something the user has to read.
+   */
+  excludesTraits?: MerchantTrait[];
+  /** Specific merchants this rule never pays at. */
+  excludesMerchantIds?: string[];
 }
 
 export interface RewardCap {
@@ -154,6 +173,8 @@ export interface Merchant {
   aliases?: string[];
   /** Checkout domains used to match online purchases. */
   domains?: string[];
+  /** What kind of store this is, for issuer exclusions. See MerchantTrait. */
+  traits?: MerchantTrait[];
   /**
    * Networks the merchant accepts. Omit when it takes everything.
    * Costco famously only takes Visa, which changes the answer entirely.

@@ -79,6 +79,7 @@ export const seedCards: Card[] = [
         label: "4% on gas and EV charging",
         categories: ["gas"],
         rate: 0.04,
+        conditions: { excludesTraits: ["warehouse_club", "superstore"] },
         caps: { amount: 7000, period: "year", rateAfterCap: 0.01 },
         note: "First $7,000 of combined gas/EV spend per year, then 1%. Excludes gas bought at Walmart and other warehouse clubs."
       },
@@ -216,6 +217,9 @@ export const seedCards: Card[] = [
         label: "6% at U.S. supermarkets",
         categories: ["grocery"],
         rate: 0.06,
+        conditions: {
+          excludesTraits: ["superstore", "warehouse_club", "specialty_store"]
+        },
         caps: { amount: 6000, period: "year", rateAfterCap: 0.01 },
         note: "First $6,000 per year, then 1%. Superstores, warehouse clubs and specialty shops are excluded by Amex."
       },

@@ -93,6 +93,8 @@ recommendation, so an empty wallet says so rather than guessing.
 
 ## Docs
 
+- [AGENTS.md](AGENTS.md) — start here if you are picking this up: engine invariants, hard constraints, and what is placeholder data.
+
 - [docs/STATUS.md](docs/STATUS.md) — what is verified working, what is limited, what is not built.
 - [docs/SECURITY.md](docs/SECURITY.md) — security and privacy review, data model, validation.
 - [docs/RELEASE.md](docs/RELEASE.md) — App Store / Play Store checklist and cost breakdown.

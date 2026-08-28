@@ -1,197 +1,604 @@
-import { useEffect, useMemo, useState } from "react";
+import * as Notifications from "expo-notifications";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
   Pressable,
   SafeAreaView,
   ScrollView,
-  StyleSheet,
   Switch,
   Text,
   TextInput,
   View
 } from "react-native";
 
-import { seedCards, seedMerchants, seedSettings } from "./src/data/seed";
-import { decideBestCard } from "./src/engine/rewards";
+import { seedCards } from "./src/data/cards";
+import { seedMerchants, seedSettings } from "./src/data/merchants";
 import {
-  registerFavoriteGeofences,
+  adHocMerchant,
+  learnAlias,
+  matchMerchant,
+  normalizeText
+} from "./src/engine/merchantMatch";
+import { formatMoney, formatRate, recommend } from "./src/engine/rewards";
+import {
+  activateQuarter,
+  deactivateQuarter,
+  isActivated,
+  pruneActivations,
+  pruneLedger,
+  quarterOf,
+  recordSpend
+} from "./src/engine/spend";
+import {
+  captureCurrentLocation,
+  geofenceStatus,
+  handleRegionEnter,
+  PermissionReport,
   requestNudgePermissions,
-  shouldNotifyNow
+  SyncResult,
+  syncGeofences
 } from "./src/services/geofence";
-import { loadJson, saveJson, storageKeys } from "./src/services/storage";
+import { evaluateNudge } from "./src/services/nudgePolicy";
+import { clearAll, loadSnapshot, saveJson, storageKeys } from "./src/services/storage";
+import { Banner, Button, ChipPicker, Section, Toggle } from "./src/ui/components";
+import { colors, styles } from "./src/ui/theme";
 import {
+  ActivationLedger,
   AppSettings,
   Card,
-  Decision,
+  CardScore,
+  LoggedDecision,
+  MatchConfidence,
   Merchant,
+  MerchantCategory,
+  merchantCategories,
+  MerchantTrait,
+  categoryLabels,
+  NudgeState,
   PaymentMethod,
   PurchaseChannel,
+  SpendLedger,
   UserOverride
 } from "./src/types/domain";
 
-type Tab = "recommend" | "favorites" | "cards" | "history";
+type Tab = "recommend" | "places" | "cards" | "history";
 
 const tabs: { key: Tab; label: string }[] = [
-  { key: "recommend", label: "What Card?" },
-  { key: "favorites", label: "Favorites" },
-  { key: "cards", label: "Cards" },
+  { key: "recommend", label: "What card?" },
+  { key: "places", label: "Places" },
+  { key: "cards", label: "Wallet" },
   { key: "history", label: "History" }
 ];
 
-const pct = (rate: number): string => `${Math.round(rate * 1000) / 10}%`;
+const confidenceTone: Record<MatchConfidence, "positive" | "warning" | "danger"> = {
+  high: "positive",
+  medium: "warning",
+  ambiguous: "warning",
+  low: "danger"
+};
+
+const isAdHocId = (merchantId: string): boolean => merchantId.startsWith("adhoc:");
+
+const parseAmount = (raw: string): number | undefined => {
+  const value = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+};
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("recommend");
-  const [cards, setCards] = useState<Card[]>(seedCards);
-  const [merchants] = useState<Merchant[]>(seedMerchants);
-  const [favoriteMerchantIds, setFavoriteMerchantIds] = useState<string[]>([]);
-  const [decisions, setDecisions] = useState<Decision[]>([]);
-  const [overrides, setOverrides] = useState<UserOverride[]>([]);
-  const [settings, setSettings] = useState<AppSettings>(seedSettings);
+  const [hydrated, setHydrated] = useState(false);
 
-  const [selectedMerchantId, setSelectedMerchantId] = useState<string>(seedMerchants[0]!.id);
+  // `cards` is the catalogue of known card definitions; `walletCardIds` is what
+  // the user actually holds. Only wallet cards are ever scored.
+  const [cards, setCards] = useState<Card[]>(seedCards);
+  const [walletCardIds, setWalletCardIds] = useState<string[] | null>(null);
+  const [merchants, setMerchants] = useState<Merchant[]>(seedMerchants);
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [overrides, setOverrides] = useState<UserOverride[]>([]);
+  const [decisions, setDecisions] = useState<LoggedDecision[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(seedSettings);
+  const [ledger, setLedger] = useState<SpendLedger>({});
+  const [activations, setActivations] = useState<ActivationLedger>({});
+  const [learnedAliases, setLearnedAliases] = useState<Record<string, string>>({});
+  const [nudgeState, setNudgeState] = useState<NudgeState>({
+    lastNudgeAt: 0,
+    lastNudgeByMerchant: {}
+  });
+
+  // Recommendation inputs.
+  const [query, setQuery] = useState("");
+  const [confirmedMerchantId, setConfirmedMerchantId] = useState<string | null>(null);
+  const [adHocCategory, setAdHocCategory] = useState<MerchantCategory>("other");
+  const [adHocTrait, setAdHocTrait] = useState<MerchantTrait | null>(null);
   const [channel, setChannel] = useState<PurchaseChannel>("in_store");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("apple_pay");
-  const [nudgeAutomationEnabled, setNudgeAutomationEnabled] = useState<boolean>(false);
+  const [amountText, setAmountText] = useState("");
+  const [isForeign, setIsForeign] = useState(false);
+  const [viaPortal, setViaPortal] = useState(false);
+  const [showAllCards, setShowAllCards] = useState(false);
 
+  // Geofence surface.
+  const [permissions, setPermissions] = useState<PermissionReport | null>(null);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+
+  // Custom card editor.
   const [newCardName, setNewCardName] = useState("");
-  const [newCardNetwork, setNewCardNetwork] = useState("Visa");
-  const [newCardDefaultRatePct, setNewCardDefaultRatePct] = useState("1");
+  const [newCardNetwork, setNewCardNetwork] = useState<Card["network"]>("Visa");
+  const [newCardRate, setNewCardRate] = useState("1.5");
+  const [newCardAnnualFee, setNewCardAnnualFee] = useState("0");
+  const [newCardForeignFee, setNewCardForeignFee] = useState("0");
+  const [newCardBonusCategory, setNewCardBonusCategory] = useState<MerchantCategory | null>(null);
+  const [newCardBonusRate, setNewCardBonusRate] = useState("3");
+
+  // Geofence diagnostics.
+  const [geoStatus, setGeoStatus] = useState<{ taskRegistered: boolean; running: boolean } | null>(
+    null
+  );
+
+  const hydratedRef = useRef(false);
 
   useEffect(() => {
-    const hydrate = async () => {
-      const [savedCards, savedFavorites, savedDecisions, savedOverrides, savedSettings] =
-        await Promise.all([
-          loadJson<Card[]>(storageKeys.cards),
-          loadJson<string[]>(storageKeys.favorites),
-          loadJson<Decision[]>(storageKeys.decisions),
-          loadJson<UserOverride[]>(storageKeys.overrides),
-          loadJson<AppSettings>(storageKeys.settings)
-        ]);
-
-      if (savedCards?.length) setCards(savedCards);
-      if (savedFavorites) setFavoriteMerchantIds(savedFavorites);
-      if (savedDecisions) setDecisions(savedDecisions);
-      if (savedOverrides) setOverrides(savedOverrides);
-      if (savedSettings) setSettings(savedSettings);
+    const hydrate = async (): Promise<void> => {
+      const snapshot = await loadSnapshot();
+      setCards(snapshot.cards);
+      setWalletCardIds(snapshot.walletCardIds);
+      setMerchants(snapshot.merchants);
+      setFavorites(snapshot.favorites);
+      setOverrides(snapshot.overrides);
+      setDecisions(snapshot.decisions);
+      setSettings(snapshot.settings);
+      setLedger(pruneLedger(snapshot.ledger));
+      setActivations(pruneActivations(snapshot.activations));
+      setLearnedAliases(snapshot.learnedAliases);
+      setNudgeState(snapshot.nudgeState);
+      hydratedRef.current = true;
+      setHydrated(true);
     };
 
     void hydrate();
   }, []);
 
+  // Persist only after hydration, otherwise the first render would overwrite
+  // stored data with seeds.
+  const persist = useCallback(<T,>(key: string, value: T): void => {
+    if (!hydratedRef.current) {
+      return;
+    }
+    void saveJson(key, value);
+  }, []);
+
+  useEffect(() => persist(storageKeys.cards, cards), [cards, persist]);
   useEffect(() => {
-    void saveJson(storageKeys.cards, cards);
-  }, [cards]);
+    // null means "not chosen yet"; do not write that over a real choice.
+    if (walletCardIds) {
+      persist(storageKeys.wallet, walletCardIds);
+    }
+  }, [walletCardIds, persist]);
+  useEffect(() => persist(storageKeys.merchants, merchants), [merchants, persist]);
+  useEffect(() => persist(storageKeys.favorites, favorites), [favorites, persist]);
+  useEffect(() => persist(storageKeys.overrides, overrides), [overrides, persist]);
+  useEffect(() => persist(storageKeys.decisions, decisions), [decisions, persist]);
+  useEffect(() => persist(storageKeys.settings, settings), [settings, persist]);
+  useEffect(() => persist(storageKeys.ledger, ledger), [ledger, persist]);
+  useEffect(() => persist(storageKeys.activations, activations), [activations, persist]);
+  useEffect(() => persist(storageKeys.learnedAliases, learnedAliases), [learnedAliases, persist]);
 
+  // Tapping a geofence notification should land on that store's answer.
   useEffect(() => {
-    void saveJson(storageKeys.favorites, favoriteMerchantIds);
-  }, [favoriteMerchantIds]);
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data as
+        | { merchantId?: string }
+        | undefined;
+      if (data?.merchantId) {
+        setConfirmedMerchantId(data.merchantId);
+        setQuery("");
+        setChannel("in_store");
+        setTab("recommend");
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
-  useEffect(() => {
-    void saveJson(storageKeys.decisions, decisions);
-  }, [decisions]);
+  const match = useMemo(
+    () => matchMerchant(query, merchants, { learnedAliases }),
+    [query, merchants, learnedAliases]
+  );
 
-  useEffect(() => {
-    void saveJson(storageKeys.overrides, overrides);
-  }, [overrides]);
+  const favoriteMerchants = useMemo(
+    () => merchants.filter((merchant) => favorites.includes(merchant.id)),
+    [merchants, favorites]
+  );
 
-  useEffect(() => {
-    void saveJson(storageKeys.settings, settings);
-  }, [settings]);
+  const activeMerchant: Merchant = useMemo(() => {
+    const confirmed = confirmedMerchantId
+      ? merchants.find((item) => item.id === confirmedMerchantId)
+      : undefined;
+    if (confirmed) {
+      return confirmed;
+    }
+    if (query.trim() && match.best) {
+      return match.best.merchant;
+    }
+    if (query.trim()) {
+      return adHocMerchant(query, adHocCategory);
+    }
+    return favoriteMerchants[0] ?? merchants[0] ?? seedMerchants[0]!;
+  }, [confirmedMerchantId, merchants, query, match, adHocCategory, favoriteMerchants]);
 
-  const selectedMerchant = useMemo(() => {
-    const fallbackMerchant = merchants[0] ?? seedMerchants[0]!;
-    return merchants.find((item) => item.id === selectedMerchantId) ?? fallbackMerchant;
-  }, [merchants, selectedMerchantId]);
+  /** Only the cards the user holds. Unset wallet = not onboarded yet. */
+  const walletCards = useMemo(() => {
+    if (!walletCardIds) {
+      return cards;
+    }
+    const chosen = new Set(walletCardIds);
+    return cards.filter((card) => chosen.has(card.id));
+  }, [cards, walletCardIds]);
 
-  const recommendation = useMemo(() => {
-    return decideBestCard(cards, { merchant: selectedMerchant, channel, paymentMethod }, overrides);
-  }, [cards, selectedMerchant, channel, paymentMethod, overrides]);
+  const needsOnboarding = walletCardIds != null && walletCards.length === 0;
+  const isAdHoc = isAdHocId(activeMerchant.id);
+  const amount = parseAmount(amountText);
 
-  const runnerUp = recommendation.scores[1];
-  const bestCard = cards.find((card) => card.id === recommendation.decision.bestCardId);
+  const result = useMemo(
+    () =>
+      recommend(
+        walletCards,
+        {
+          merchant: activeMerchant,
+          channel,
+          paymentMethod,
+          ...(amount != null ? { amount } : {}),
+          isForeignTransaction: isForeign,
+          viaIssuerPortal: viaPortal
+        },
+        {
+          overrides,
+          ledger,
+          activations,
+          amortiseAnnualFees: settings.amortiseAnnualFees,
+          assumedAnnualSpend: settings.assumedAnnualSpend
+        }
+      ),
+    [
+      walletCards,
+      activeMerchant,
+      channel,
+      paymentMethod,
+      amount,
+      isForeign,
+      viaPortal,
+      overrides,
+      ledger,
+      activations,
+      settings.amortiseAnnualFees,
+      settings.assumedAnnualSpend
+    ]
+  );
+
+  const nudgePreview = useMemo(
+    () =>
+      evaluateNudge(
+        settings,
+        {
+          merchantId: activeMerchant.id,
+          delta: result.deltaVsRunnerUp,
+          hasWinner: result.winner != null,
+          isTie: result.isTie
+        },
+        nudgeState
+      ),
+    [settings, activeMerchant.id, result, nudgeState]
+  );
+
+  const selectMerchant = (merchantId: string): void => {
+    setConfirmedMerchantId(merchantId);
+    // Remember the spelling that got us here so the same descriptor is a
+    // one-tap match next time.
+    if (query.trim() && !isAdHocId(merchantId)) {
+      setLearnedAliases((prev) => learnAlias(prev, query, merchantId));
+    }
+  };
+
+  const logDecision = (accepted: boolean, score: CardScore | null): void => {
+    if (!score) {
+      return;
+    }
+
+    const entry: LoggedDecision = {
+      id: `${Date.now()}-${score.cardId}`,
+      merchantId: activeMerchant.id,
+      cardId: score.cardId,
+      effectiveRate: score.effectiveRate,
+      ...(amount != null ? { amount } : {}),
+      summary: result.summary,
+      timestamp: Date.now(),
+      accepted,
+      source: "manual"
+    };
+    setDecisions((prev) => [entry, ...prev].slice(0, 300));
+
+    // Only accepted purchases count against a capped bonus category.
+    if (accepted && amount != null && score.appliedRuleId) {
+      const card = cards.find((item) => item.id === score.cardId);
+      const rule = card?.rewardRules.find((item) => item.id === score.appliedRuleId);
+      if (rule?.caps) {
+        setLedger((prev) => recordSpend(prev, rule.id, rule.caps!, amount));
+      }
+    }
+
+    setAmountText("");
+  };
 
   const toggleFavorite = (merchantId: string): void => {
-    setFavoriteMerchantIds((prev) =>
+    setFavorites((prev) =>
       prev.includes(merchantId) ? prev.filter((id) => id !== merchantId) : [...prev, merchantId]
     );
   };
 
-  const saveOverride = (merchantId: string, cardId: string): void => {
-    setOverrides((prev) => {
-      const filtered = prev.filter((item) => item.merchantId !== merchantId);
-      return [...filtered, { merchantId, cardId }];
+  const pinLocation = async (merchantId: string): Promise<void> => {
+    const captured = await captureCurrentLocation();
+    if (!captured.ok) {
+      Alert.alert("Could not pin this store", captured.reason);
+      return;
+    }
+
+    setMerchants((prev) =>
+      prev.map((merchant) =>
+        merchant.id === merchantId ? { ...merchant, location: captured.point } : merchant
+      )
+    );
+    Alert.alert(
+      "Store pinned",
+      "Saved this spot. Turn geofence nudges on to start monitoring it."
+    );
+  };
+
+  const refreshGeofences = useCallback(
+    async (enabled: boolean, list: Merchant[]): Promise<void> => {
+      const sync = await syncGeofences(list, enabled);
+      setSyncResult(sync);
+      if (sync.error) {
+        Alert.alert("Geofencing failed to start", sync.error);
+      }
+    },
+    []
+  );
+
+  const setGeofenceEnabled = async (enabled: boolean): Promise<void> => {
+    if (!enabled) {
+      setSettings((prev) => ({ ...prev, geofenceEnabled: false }));
+      await refreshGeofences(false, []);
+      return;
+    }
+
+    const report = await requestNudgePermissions();
+    setPermissions(report);
+    if (!report.granted) {
+      Alert.alert(
+        "Still missing something",
+        `Geofence nudges need: ${report.missing.join(", ")}. You can grant these in Settings and try again.`
+      );
+      setSettings((prev) => ({ ...prev, geofenceEnabled: false }));
+      return;
+    }
+
+    // The effect below picks this up and registers the regions, so there is no
+    // second syncGeofences call racing this one.
+    setSettings((prev) => ({ ...prev, geofenceEnabled: true }));
+  };
+
+  // Keep the monitored regions in step with the favorites list.
+  useEffect(() => {
+    if (!hydrated || !settings.geofenceEnabled) {
+      return;
+    }
+    void refreshGeofences(true, favoriteMerchants);
+  }, [hydrated, settings.geofenceEnabled, favoriteMerchants, refreshGeofences]);
+
+  useEffect(() => {
+    if (tab !== "places") {
+      return;
+    }
+    void geofenceStatus().then(setGeoStatus);
+  }, [tab, syncResult]);
+
+  const testNudge = async (merchantId: string): Promise<void> => {
+    const outcome = await handleRegionEnter(merchantId);
+    Alert.alert(
+      outcome.notified ? "Nudge sent" : "No nudge",
+      outcome.notified ? outcome.body ?? outcome.reason : outcome.reason
+    );
+    if (outcome.notified) {
+      const snapshot = await loadSnapshot();
+      setNudgeState(snapshot.nudgeState);
+    }
+  };
+
+  const toggleWalletCard = (cardId: string): void => {
+    setWalletCardIds((prev) => {
+      const current = prev ?? [];
+      return current.includes(cardId)
+        ? current.filter((id) => id !== cardId)
+        : [...current, cardId];
     });
   };
 
-  const clearOverride = (merchantId: string): void => {
-    setOverrides((prev) => prev.filter((item) => item.merchantId !== merchantId));
-  };
+  const addCustomCard = (): void => {
+    const name = newCardName.trim();
+    const base = Number.parseFloat(newCardRate);
+    const fee = Number.parseFloat(newCardAnnualFee || "0");
+    const foreign = Number.parseFloat(newCardForeignFee || "0");
+    const bonus = Number.parseFloat(newCardBonusRate);
 
-  const logDecision = (accepted: boolean): void => {
-    const logged: Decision = { ...recommendation.decision, accepted, timestamp: Date.now() };
-    setDecisions((prev) => [logged, ...prev].slice(0, 200));
-  };
-
-  const enableAutomation = async (): Promise<void> => {
-    const granted = await requestNudgePermissions();
-    if (!granted) {
-      Alert.alert("Permissions needed", "Enable always-on location + notifications for geofence nudges.");
-      setNudgeAutomationEnabled(false);
+    if (name.length === 0 || name.length > 60) {
+      Alert.alert("Check the name", "Give the card a nickname between 1 and 60 characters.");
+      return;
+    }
+    // A 13-19 digit run is almost certainly a real card number, which this app
+    // neither needs nor should ever store.
+    if (/\d[\d\s-]{11,}\d/.test(name)) {
+      Alert.alert(
+        "Do not enter a card number",
+        "This app only needs a nickname like \u201cChase Sapphire\u201d. It never asks for card numbers and cannot use one."
+      );
+      return;
+    }
+    if (!Number.isFinite(base) || base < 0 || base > 100) {
+      Alert.alert("Check the base rate", "The base reward rate must be between 0 and 100%.");
+      return;
+    }
+    if (!Number.isFinite(fee) || fee < 0 || fee > 10000) {
+      Alert.alert("Check the annual fee", "The annual fee must be between $0 and $10,000.");
+      return;
+    }
+    if (!Number.isFinite(foreign) || foreign < 0 || foreign > 100) {
+      Alert.alert("Check the foreign fee", "The foreign transaction fee must be between 0 and 100%.");
+      return;
+    }
+    if (newCardBonusCategory && (!Number.isFinite(bonus) || bonus < 0 || bonus > 100)) {
+      Alert.alert("Check the bonus rate", "The bonus rate must be between 0 and 100%.");
       return;
     }
 
-    const favorites = merchants.filter((merchant) => favoriteMerchantIds.includes(merchant.id));
-    await registerFavoriteGeofences(favorites);
-    setNudgeAutomationEnabled(true);
-  };
-
-  const createCard = (): void => {
-    const normalized = Number(newCardDefaultRatePct);
-    if (!newCardName.trim() || Number.isNaN(normalized)) {
-      Alert.alert("Invalid card", "Provide a card name and numeric default reward percent.");
-      return;
+    const id = `custom-${Date.now()}`;
+    const rules: Card["rewardRules"] = [];
+    if (newCardBonusCategory) {
+      rules.push({
+        id: `${id}-bonus`,
+        label: `${bonus}% on ${categoryLabels[newCardBonusCategory].toLowerCase()}`,
+        categories: [newCardBonusCategory],
+        rate: bonus / 100
+      });
     }
+    rules.push({ id: `${id}-base`, label: `${base}% on everything else`, rate: base / 100 });
 
-    const newCard: Card = {
-      id: `custom-${Date.now()}`,
-      name: newCardName.trim(),
-      network: newCardNetwork.trim() || "Other",
-      rewardRules: [
-        {
-          id: `default-${Date.now()}`,
-          rate: normalized / 100,
-          note: "Default rule from custom card editor"
-        }
-      ]
-    };
+    setCards((prev) => [
+      ...prev,
+      {
+        id,
+        name,
+        shortName: name.slice(0, 18),
+        network: newCardNetwork,
+        rewardCurrency: "cash",
+        rewardUnitValue: 1,
+        annualFee: fee,
+        foreignTransactionFee: foreign / 100,
+        isCustom: true,
+        rewardRules: rules
+      }
+    ]);
+    // A card you just added is a card you hold.
+    setWalletCardIds((prev) => [...(prev ?? []), id]);
 
-    setCards((prev) => [...prev, newCard]);
     setNewCardName("");
-    setNewCardDefaultRatePct("1");
+    setNewCardRate("1.5");
+    setNewCardAnnualFee("0");
+    setNewCardForeignFee("0");
+    setNewCardBonusCategory(null);
+    setNewCardBonusRate("3");
   };
 
-  const maybeShowNudge = (): void => {
-    const canNotify = shouldNotifyNow(settings, recommendation.deltaVsSecond);
-    if (canNotify) {
-      Alert.alert(
-        "Meaningful win",
-        `${bestCard?.name ?? "Best card"} is ahead by ${pct(recommendation.deltaVsSecond)} at ${selectedMerchant.name}.`
-      );
-    } else {
-      Alert.alert(
-        "No nudge",
-        "Difference is below your threshold, in quiet hours, or throttled by anti-spam."
-      );
-    }
+  const removeCard = (cardId: string): void => {
+    setCards((prev) => prev.filter((card) => card.id !== cardId));
+    setWalletCardIds((prev) => (prev ?? []).filter((id) => id !== cardId));
+    setOverrides((prev) => prev.filter((item) => item.cardId !== cardId));
   };
+
+  const toggleActivation = (ruleId: string): void => {
+    setActivations((prev) =>
+      isActivated(prev, ruleId) ? deactivateQuarter(prev, ruleId) : activateQuarter(prev, ruleId)
+    );
+  };
+
+  const setPointValue = (cardId: string, value: number): void => {
+    setCards((prev) =>
+      prev.map((card) => (card.id === cardId ? { ...card, rewardUnitValue: value } : card))
+    );
+  };
+
+  /**
+   * Promotes the ad-hoc merchant behind the current search into the catalogue,
+   * so an unknown store only has to be identified once.
+   */
+  const saveUnknownStore = (): void => {
+    const name = query.trim();
+    if (name.length === 0 || name.length > 80) {
+      Alert.alert("Check the name", "Give the store a name between 1 and 80 characters.");
+      return;
+    }
+
+    const id = `user-${normalizeText(name).replace(/ /g, "-") || Date.now()}`;
+    if (merchants.some((merchant) => merchant.id === id)) {
+      Alert.alert("Already saved", "A store with that name is already in your list.");
+      return;
+    }
+
+    const merchant: Merchant = {
+      id,
+      name,
+      category: adHocCategory,
+      // Traits drive issuer exclusions, so a mislabelled superstore would
+      // otherwise be promised a supermarket rate it will not pay.
+      ...(adHocTrait ? { traits: [adHocTrait] } : {}),
+      radiusMeters: 100,
+      isCustom: true
+    };
+    setMerchants((prev) => [...prev, merchant]);
+    setLearnedAliases((prev) => learnAlias(prev, name, id));
+    setConfirmedMerchantId(id);
+    setAdHocTrait(null);
+    Alert.alert(
+      "Store saved",
+      "It will match next time, and you can favorite and pin it on the Places tab."
+    );
+  };
+
+  const resetEverything = (): void => {
+    Alert.alert("Reset all data?", "This clears your cards, pins, overrides and history.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Reset",
+        style: "destructive",
+        onPress: () => {
+          void (async () => {
+            await clearAll();
+            setCards(seedCards);
+            setWalletCardIds([]);
+            setMerchants(seedMerchants);
+            setFavorites([]);
+            setOverrides([]);
+            setDecisions([]);
+            setSettings(seedSettings);
+            setLedger({});
+            setActivations({});
+            setLearnedAliases({});
+            setSyncResult(null);
+          })();
+        }
+      }
+    ]);
+  };
+
+  const paymentOptions =
+    channel === "online"
+      ? [
+          { id: "apple_pay", label: "Apple Pay" },
+          { id: "online_checkout", label: "Card number" }
+        ]
+      : [
+          { id: "apple_pay", label: "Apple Pay" },
+          { id: "physical_card", label: "Tap / swipe" }
+        ];
+
+  const override = overrides.find((item) => item.merchantId === activeMerchant.id);
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
         <Text style={styles.title}>Credit Card Teller</Text>
-        <Text style={styles.subtitle}>Max rewards with explainable recommendations</Text>
+        <Text style={styles.subtitle}>
+          {hydrated ? "Best card, and why." : "Loading your wallet…"}
+        </Text>
       </View>
 
       <View style={styles.tabs}>
@@ -200,414 +607,694 @@ export default function App() {
             key={item.key}
             style={[styles.tabButton, tab === item.key && styles.tabButtonActive]}
             onPress={() => setTab(item.key)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: tab === item.key }}
           >
-            <Text style={[styles.tabText, tab === item.key && styles.tabTextActive]}>{item.label}</Text>
+            <Text style={[styles.tabText, tab === item.key && styles.tabTextActive]}>
+              {item.label}
+            </Text>
           </Pressable>
         ))}
       </View>
 
       {tab === "recommend" && (
-        <ScrollView contentContainerStyle={styles.page}>
-          <Text style={styles.sectionLabel}>Merchant</Text>
-          <HorizontalPicker
-            options={merchants.map((merchant) => ({ id: merchant.id, label: merchant.name }))}
-            selectedId={selectedMerchantId}
-            onSelect={setSelectedMerchantId}
-          />
+        <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+          {needsOnboarding ? (
+            <Banner
+              tone="warning"
+              title="Add your cards first"
+              body="Your wallet is empty, so there is nothing to compare. Open the Wallet tab and tick the cards you actually carry."
+            />
+          ) : null}
 
-          <Text style={styles.sectionLabel}>Channel</Text>
-          <HorizontalPicker
-            options={[
-              { id: "in_store", label: "In-store" },
-              { id: "online", label: "Online" }
-            ]}
-            selectedId={channel}
-            onSelect={(value) => setChannel(value as PurchaseChannel)}
-          />
+          <Section label="Where are you?">
+            <TextInput
+              style={styles.input}
+              placeholder="Store name, card descriptor or checkout URL"
+              autoCapitalize="none"
+              autoCorrect={false}
+              value={query}
+              onChangeText={(text) => {
+                setQuery(text);
+                setConfirmedMerchantId(null);
+              }}
+            />
 
-          <Text style={styles.sectionLabel}>Payment method</Text>
-          <HorizontalPicker
-            options={[
-              { id: "apple_pay", label: "Apple Pay" },
-              { id: "physical_card", label: "Physical" },
-              { id: "online_checkout", label: "Checkout" }
-            ]}
-            selectedId={paymentMethod}
-            onSelect={(value) => setPaymentMethod(value as PaymentMethod)}
-          />
+            {query.trim().length > 0 && match.best && match.needsConfirmation && !confirmedMerchantId ? (
+              <Banner
+                tone={confidenceTone[match.confidence]}
+                title={`${match.confidence.toUpperCase()} confidence match`}
+                body={match.explanation}
+              />
+            ) : null}
 
-          <View style={styles.recommendationCard}>
-            <Text style={styles.cardHeadline}>Best card now</Text>
-            <Text style={styles.bestCardName}>{bestCard?.name ?? "No result"}</Text>
-            <Text style={styles.bestRate}>{pct(recommendation.decision.rate)}</Text>
-            <Text style={styles.reason}>{recommendation.decision.reason}</Text>
-            <Text style={styles.smallText}>
-              Runner-up: {runnerUp ? `${runnerUp.cardName} at ${pct(runnerUp.rate)}` : "n/a"}
-            </Text>
+            {query.trim().length > 0 && !match.best ? (
+              <Banner tone="danger" title="No match" body={match.explanation} />
+            ) : null}
+
+            {query.trim().length > 0 && match.candidates.length > 0 ? (
+              <ChipPicker
+                options={match.candidates.map((candidate) => ({
+                  id: candidate.merchant.id,
+                  label: `${candidate.merchant.name} · ${Math.round(candidate.score * 100)}%`
+                }))}
+                selectedId={activeMerchant.id}
+                onSelect={selectMerchant}
+              />
+            ) : null}
+
+            {query.trim().length > 0 && !match.best ? (
+              <>
+                <Text style={styles.faintText}>
+                  Pick the category and the engine will still rank your cards for
+                  &ldquo;{query.trim()}&rdquo;.
+                </Text>
+                <ChipPicker
+                  options={merchantCategories.map((category) => ({
+                    id: category,
+                    label: categoryLabels[category]
+                  }))}
+                  selectedId={adHocCategory}
+                  onSelect={(id) => setAdHocCategory(id as MerchantCategory)}
+                />
+                <Text style={styles.faintText}>
+                  What kind of store is it? Some cards refuse their bonus rate at
+                  superstores, warehouse clubs and specialty shops.
+                </Text>
+                <ChipPicker
+                  options={[
+                    { id: "none", label: "Ordinary store" },
+                    { id: "superstore", label: "Superstore" },
+                    { id: "warehouse_club", label: "Warehouse club" },
+                    { id: "specialty_store", label: "Specialty store" }
+                  ]}
+                  selectedId={adHocTrait ?? "none"}
+                  onSelect={(id) =>
+                    setAdHocTrait(id === "none" ? null : (id as MerchantTrait))
+                  }
+                />
+                <Button
+                  label="Save this store"
+                  variant="secondary"
+                  onPress={saveUnknownStore}
+                />
+              </>
+            ) : null}
+
+            {query.trim().length === 0 ? (
+              <ChipPicker
+                options={(favoriteMerchants.length > 0 ? favoriteMerchants : merchants)
+                  .slice(0, 12)
+                  .map((merchant) => ({ id: merchant.id, label: merchant.name }))}
+                selectedId={activeMerchant.id}
+                onSelect={setConfirmedMerchantId}
+              />
+            ) : null}
+          </Section>
+
+          <Section label="How are you paying?">
+            <ChipPicker
+              options={[
+                { id: "in_store", label: "In store" },
+                { id: "online", label: "Online" }
+              ]}
+              selectedId={channel}
+              onSelect={(id) => {
+                const next = id as PurchaseChannel;
+                setChannel(next);
+                setPaymentMethod((prev) => {
+                  if (next === "online" && prev === "physical_card") return "online_checkout";
+                  if (next === "in_store" && prev === "online_checkout") return "physical_card";
+                  return prev;
+                });
+              }}
+            />
+            <ChipPicker
+              options={paymentOptions}
+              selectedId={paymentMethod}
+              onSelect={(id) => setPaymentMethod(id as PaymentMethod)}
+            />
+            <View style={styles.row}>
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Amount (optional)"
+                keyboardType="decimal-pad"
+                value={amountText}
+                onChangeText={setAmountText}
+              />
+            </View>
+            <View style={[styles.row, { flexWrap: "wrap" }]}>
+              <Toggle
+                label="Foreign purchase"
+                active={isForeign}
+                onPress={() => setIsForeign((prev) => !prev)}
+              />
+              <Toggle
+                label="Booked via issuer portal"
+                active={viaPortal}
+                onPress={() => setViaPortal((prev) => !prev)}
+              />
+            </View>
+          </Section>
+
+          <View style={styles.panel}>
+            <Text style={styles.eyebrow}>Use this card at {activeMerchant.name}</Text>
+            {result.winner ? (
+              <>
+                <Text style={styles.bestCardName}>{result.winner.cardName}</Text>
+                <Text style={styles.bestRate}>{formatRate(result.winner.effectiveRate)}</Text>
+                <Text style={styles.smallText}>{result.summary}</Text>
+
+                <View style={styles.divider} />
+                <Text style={styles.eyebrow}>Why</Text>
+                {result.winner.factors.map((factor, index) => (
+                  <View key={`${factor.label}-${index}`} style={styles.spread}>
+                    <Text style={[styles.smallText, styles.grow]}>
+                      <Text style={{ fontWeight: "700", color: colors.ink }}>{factor.label}</Text>
+                      {` — ${factor.detail}`}
+                    </Text>
+                    {factor.deltaRate != null ? (
+                      <Text
+                        style={{
+                          color: factor.deltaRate < 0 ? colors.danger : colors.positive,
+                          fontWeight: "700",
+                          fontSize: 13
+                        }}
+                      >
+                        {factor.deltaRate > 0 ? "+" : ""}
+                        {formatRate(factor.deltaRate)}
+                      </Text>
+                    ) : null}
+                  </View>
+                ))}
+
+                {result.adjustments.map((note) => (
+                  <Banner key={note} tone="warning" body={note} />
+                ))}
+                {result.winner.caveats.map((note) => (
+                  <Text key={note} style={styles.faintText}>
+                    • {note}
+                  </Text>
+                ))}
+              </>
+            ) : (
+              <Text style={styles.smallText}>{result.summary}</Text>
+            )}
           </View>
 
           <View style={styles.row}>
-            <Pressable style={styles.primaryButton} onPress={() => logDecision(true)}>
-              <Text style={styles.primaryButtonText}>Accepted suggestion</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={() => logDecision(false)}>
-              <Text style={styles.secondaryButtonText}>Dismissed</Text>
-            </Pressable>
-          </View>
-
-          <Text style={styles.sectionLabel}>Override for this merchant</Text>
-          <HorizontalPicker
-            options={cards.map((card) => ({ id: card.id, label: card.name }))}
-            selectedId={recommendation.decision.bestCardId}
-            onSelect={(id) => saveOverride(selectedMerchant.id, id)}
-          />
-          <Pressable style={styles.linkButton} onPress={() => clearOverride(selectedMerchant.id)}>
-            <Text style={styles.linkText}>Clear override</Text>
-          </Pressable>
-
-          <Text style={styles.sectionLabel}>Nudge quality gate</Text>
-          <Text style={styles.smallText}>
-            Fire only if win is at least {pct(settings.nudgeDeltaThreshold)} and outside quiet hours.
-          </Text>
-          <Pressable style={styles.secondaryButton} onPress={maybeShowNudge}>
-            <Text style={styles.secondaryButtonText}>Simulate nudge decision</Text>
-          </Pressable>
-
-          <Text style={styles.sectionLabel}>Future feature</Text>
-          <Text style={styles.smallText}>
-            Expand merchant detection and recommendation confidence for online checkout flows.
-          </Text>
-        </ScrollView>
-      )}
-
-      {tab === "favorites" && (
-        <ScrollView contentContainerStyle={styles.page}>
-          <View style={styles.settingRow}>
-            <View style={styles.settingTextWrap}>
-              <Text style={styles.sectionLabel}>Geofence automation</Text>
-              <Text style={styles.smallText}>Optional and limited to favorite stores only.</Text>
-            </View>
-            <Switch
-              value={nudgeAutomationEnabled}
-              onValueChange={(value) => {
-                if (value) {
-                  void enableAutomation();
-                  return;
-                }
-                setNudgeAutomationEnabled(false);
-              }}
+            <Button label="I used it" onPress={() => logDecision(true, result.winner)} />
+            <Button
+              label="Used another"
+              variant="secondary"
+              onPress={() => logDecision(false, result.winner)}
             />
           </View>
 
-          <Text style={styles.sectionLabel}>Favorite stores (top N)</Text>
-          {merchants.map((merchant) => {
-            const selected = favoriteMerchantIds.includes(merchant.id);
-            return (
-              <Pressable
-                key={merchant.id}
-                style={[styles.favoriteItem, selected && styles.favoriteItemActive]}
-                onPress={() => toggleFavorite(merchant.id)}
-              >
-                <Text style={styles.favoriteName}>{merchant.name}</Text>
-                <Text style={styles.smallText}>{selected ? "Monitoring" : "Not monitoring"}</Text>
-              </Pressable>
-            );
-          })}
+          <Pressable onPress={() => setShowAllCards((prev) => !prev)} style={styles.linkButton}>
+            <Text style={styles.linkText}>
+              {showAllCards ? "Hide" : "Show"} all {result.ranked.length} cards
+            </Text>
+          </Pressable>
+
+          {showAllCards
+            ? result.ranked.map((score) => (
+                <View
+                  key={score.cardId}
+                  style={[
+                    styles.listItem,
+                    score.cardId === result.winner?.cardId && styles.listItemActive
+                  ]}
+                >
+                  <View style={styles.spread}>
+                    <Text style={{ fontWeight: "700", color: colors.ink, flex: 1 }}>
+                      {score.cardName}
+                    </Text>
+                    <Text
+                      style={{
+                        fontWeight: "800",
+                        color: score.eligible ? colors.accent : colors.inkFaint
+                      }}
+                    >
+                      {score.eligible ? formatRate(score.effectiveRate) : "—"}
+                    </Text>
+                  </View>
+                  <Text style={styles.faintText}>
+                    {score.eligible ? score.headline : score.ineligibleReason}
+                  </Text>
+                  {score.eligible && amount != null && score.estimatedValue != null ? (
+                    <Text style={styles.faintText}>
+                      {formatMoney(score.estimatedValue)} back on {formatMoney(amount)}
+                    </Text>
+                  ) : null}
+                </View>
+              ))
+            : null}
+
+          {!isAdHoc ? (
+            <Section label="Always use a specific card here">
+              <ChipPicker
+                options={result.ranked
+                  .filter((score) => score.eligible)
+                  .map((score) => ({ id: score.cardId, label: score.cardShortName }))}
+                selectedId={override?.cardId ?? null}
+                onSelect={(cardId) =>
+                  setOverrides((prev) => [
+                    ...prev.filter((item) => item.merchantId !== activeMerchant.id),
+                    { merchantId: activeMerchant.id, cardId, createdAt: Date.now() }
+                  ])
+                }
+              />
+              {override ? (
+                <Pressable
+                  style={styles.linkButton}
+                  onPress={() =>
+                    setOverrides((prev) =>
+                      prev.filter((item) => item.merchantId !== activeMerchant.id)
+                    )
+                  }
+                >
+                  <Text style={styles.linkText}>Clear override</Text>
+                </Pressable>
+              ) : null}
+            </Section>
+          ) : null}
+
+          <Section label="Would this interrupt you?">
+            <Banner
+              tone={nudgePreview.allow ? "positive" : "info"}
+              title={nudgePreview.allow ? "A nudge would fire here" : "No nudge"}
+              body={nudgePreview.explanation}
+            />
+          </Section>
+        </ScrollView>
+      )}
+
+      {tab === "places" && (
+        <ScrollView contentContainerStyle={styles.page}>
+          <View style={styles.panel}>
+            <View style={styles.spread}>
+              <View style={styles.grow}>
+                <Text style={styles.sectionLabel}>Geofence nudges</Text>
+                <Text style={styles.smallText}>
+                  Off by default. Only pinned favorites are monitored, and iOS allows 20 at a time.
+                </Text>
+              </View>
+              <Switch
+                value={settings.geofenceEnabled}
+                onValueChange={(value) => void setGeofenceEnabled(value)}
+              />
+            </View>
+
+            {permissions && permissions.missing.length > 0 ? (
+              <Banner
+                tone="warning"
+                title="Missing permissions"
+                body={permissions.missing.join(" · ")}
+              />
+            ) : null}
+
+            {settings.geofenceEnabled && geoStatus ? (
+              <Text style={styles.faintText}>
+                Background task {geoStatus.taskRegistered ? "registered" : "NOT registered"} ·
+                monitoring {geoStatus.running ? "active" : "inactive"}
+              </Text>
+            ) : null}
+
+            {settings.geofenceEnabled && syncResult ? (
+              <Banner
+                tone={syncResult.started ? "positive" : "warning"}
+                title={
+                  syncResult.started
+                    ? `Monitoring ${syncResult.registered.length} store(s)`
+                    : "Nothing is being monitored"
+                }
+                body={
+                  syncResult.skipped.length > 0
+                    ? syncResult.skipped.map((item) => `${item.name}: ${item.reason}`).join("\n")
+                    : "All favorites are pinned and registered."
+                }
+              />
+            ) : null}
+          </View>
+
+          <Section label="Nudge quality gate">
+            <Text style={styles.faintText}>Only interrupt when the best card wins by at least</Text>
+            <ChipPicker
+              options={[
+                { id: "0.005", label: "0.5 pts" },
+                { id: "0.01", label: "1 pt" },
+                { id: "0.02", label: "2 pts" },
+                { id: "0.03", label: "3 pts" }
+              ]}
+              selectedId={String(settings.nudgeDeltaThreshold)}
+              onSelect={(id) =>
+                setSettings((prev) => ({ ...prev, nudgeDeltaThreshold: Number(id) }))
+              }
+            />
+            <Text style={styles.faintText}>Quiet hours start</Text>
+            <ChipPicker
+              options={[20, 21, 22, 23].map((hour) => ({ id: String(hour), label: `${hour}:00` }))}
+              selectedId={String(settings.quietHoursStart)}
+              onSelect={(id) => setSettings((prev) => ({ ...prev, quietHoursStart: Number(id) }))}
+            />
+            <Text style={styles.faintText}>Quiet hours end</Text>
+            <ChipPicker
+              options={[5, 6, 7, 8, 9].map((hour) => ({ id: String(hour), label: `${hour}:00` }))}
+              selectedId={String(settings.quietHoursEnd)}
+              onSelect={(id) => setSettings((prev) => ({ ...prev, quietHoursEnd: Number(id) }))}
+            />
+            <Text style={styles.faintText}>Assume this payment method when a geofence fires</Text>
+            <ChipPicker
+              options={[
+                { id: "apple_pay", label: "Apple Pay" },
+                { id: "physical_card", label: "Tap / swipe" }
+              ]}
+              selectedId={settings.defaultPaymentMethod}
+              onSelect={(id) =>
+                setSettings((prev) => ({ ...prev, defaultPaymentMethod: id as PaymentMethod }))
+              }
+            />
+          </Section>
+
+          <Section label="Your stores">
+            {merchants.map((merchant) => {
+              const isFavorite = favorites.includes(merchant.id);
+              return (
+                <View
+                  key={merchant.id}
+                  style={[styles.listItem, isFavorite && styles.listItemActive]}
+                >
+                  <View style={styles.spread}>
+                    <View style={styles.grow}>
+                      <Text style={{ fontWeight: "700", color: colors.ink }}>{merchant.name}</Text>
+                      <Text style={styles.faintText}>
+                        {categoryLabels[merchant.category]}
+                        {merchant.location
+                          ? ` · pinned (${merchant.radiusMeters ?? 100}m)`
+                          : " · not pinned"}
+                      </Text>
+                    </View>
+                    <Switch value={isFavorite} onValueChange={() => toggleFavorite(merchant.id)} />
+                  </View>
+
+                  {isFavorite ? (
+                    <View style={styles.row}>
+                      <Button
+                        label={merchant.location ? "Re-pin here" : "Pin current location"}
+                        variant="secondary"
+                        onPress={() => void pinLocation(merchant.id)}
+                      />
+                      <Button
+                        label="Test nudge"
+                        variant="secondary"
+                        onPress={() => void testNudge(merchant.id)}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
+          </Section>
         </ScrollView>
       )}
 
       {tab === "cards" && (
         <ScrollView contentContainerStyle={styles.page}>
-          <Text style={styles.sectionLabel}>Saved cards</Text>
-          {cards.map((card) => (
-            <View style={styles.savedCard} key={card.id}>
-              <Text style={styles.favoriteName}>{card.name}</Text>
-              <Text style={styles.smallText}>{card.network}</Text>
-              <Text style={styles.smallText}>{card.rewardRules.length} reward rule(s)</Text>
-            </View>
-          ))}
+          {needsOnboarding ? (
+            <Banner
+              tone="warning"
+              title="Pick the cards you carry"
+              body="Only the cards switched on below are compared. Leaving a card off means it is never recommended."
+            />
+          ) : null}
 
-          <Text style={styles.sectionLabel}>Add custom card</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Card name"
-            value={newCardName}
-            onChangeText={setNewCardName}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Network"
-            value={newCardNetwork}
-            onChangeText={setNewCardNetwork}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Default reward %"
-            keyboardType="numeric"
-            value={newCardDefaultRatePct}
-            onChangeText={setNewCardDefaultRatePct}
-          />
-          <Pressable style={styles.primaryButton} onPress={createCard}>
-            <Text style={styles.primaryButtonText}>Save card</Text>
-          </Pressable>
+          <Section label={`Cards you carry (${walletCards.length} of ${cards.length})`}>
+            {cards.map((card) => {
+              const inWallet = walletCardIds == null || walletCardIds.includes(card.id);
+              return (
+              <View
+                key={card.id}
+                style={[styles.listItem, inWallet && styles.listItemActive]}
+              >
+                <View style={styles.spread}>
+                  <View style={styles.grow}>
+                    <Text style={{ fontWeight: "700", color: colors.ink }}>{card.name}</Text>
+                    <Text style={styles.faintText}>{card.network}</Text>
+                  </View>
+                  <Switch value={inWallet} onValueChange={() => toggleWalletCard(card.id)} />
+                </View>
+                <Text style={styles.faintText}>
+                  {card.annualFee > 0 ? `${formatMoney(card.annualFee)}/yr` : "No annual fee"} ·{" "}
+                  {card.foreignTransactionFee > 0
+                    ? `${formatRate(card.foreignTransactionFee)} foreign fee`
+                    : "No foreign fee"}
+                  {card.termsAsOf ? ` · terms checked ${card.termsAsOf}` : ""}
+                </Text>
+
+                {card.rewardRules.map((rule) => {
+                  const quarters = rule.conditions?.activeQuarters;
+                  // Out-of-season rotations are noise in the wallet list.
+                  if (quarters && !quarters.includes(quarterOf(new Date()))) {
+                    return null;
+                  }
+                  return (
+                    <Text key={rule.id} style={styles.smallText}>
+                      • {rule.label}
+                      {rule.caps
+                        ? ` (first ${formatMoney(rule.caps.amount)}/${rule.caps.period})`
+                        : ""}
+                    </Text>
+                  );
+                })}
+
+                {card.rewardRules
+                  .filter(
+                    (rule) =>
+                      rule.conditions?.requiresActivation &&
+                      rule.conditions.activeQuarters?.includes(quarterOf(new Date()))
+                  )
+                  .map((rule) => {
+                    const on = isActivated(activations, rule.id);
+                    return (
+                      <View key={`${rule.id}-activate`} style={styles.spread}>
+                        <View style={styles.grow}>
+                          <Text style={styles.smallText}>
+                            Activated for Q{quarterOf(new Date())}
+                          </Text>
+                          <Text style={styles.faintText}>
+                            {on
+                              ? "Earning the bonus rate."
+                              : "Not activated — this earns the base rate until you activate with the issuer."}
+                          </Text>
+                        </View>
+                        <Switch value={on} onValueChange={() => toggleActivation(rule.id)} />
+                      </View>
+                    );
+                  })}
+
+                {card.rewardCurrency !== "cash" ? (
+                  <>
+                    <Text style={styles.faintText}>
+                      Point value used when ranking (cents per point)
+                    </Text>
+                    <ChipPicker
+                      options={[
+                        { id: "1", label: "1.0¢ (cash)" },
+                        { id: "1.25", label: "1.25¢" },
+                        { id: "1.5", label: "1.5¢" },
+                        { id: "2", label: "2.0¢" }
+                      ]}
+                      selectedId={String(card.rewardUnitValue)}
+                      onSelect={(id) => setPointValue(card.id, Number(id))}
+                    />
+                  </>
+                ) : null}
+
+                {card.sourceNote ? <Text style={styles.faintText}>{card.sourceNote}</Text> : null}
+
+                {card.isCustom ? (
+                  <Pressable style={styles.linkButton} onPress={() => removeCard(card.id)}>
+                    <Text style={[styles.linkText, { color: colors.danger }]}>Remove card</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+              );
+            })}
+          </Section>
+
+          <Section label="Add a card the app does not know">
+            <TextInput
+              style={styles.input}
+              placeholder="Nickname, e.g. Chase Sapphire"
+              maxLength={60}
+              value={newCardName}
+              onChangeText={setNewCardName}
+            />
+            <Text style={styles.faintText}>
+              A nickname only. This app never asks for a card number and cannot use one.
+            </Text>
+            <ChipPicker
+              options={["Visa", "Mastercard", "American Express", "Discover"].map((network) => ({
+                id: network,
+                label: network
+              }))}
+              selectedId={newCardNetwork}
+              onSelect={(id) => setNewCardNetwork(id as Card["network"])}
+            />
+            <View style={styles.row}>
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Base reward %"
+                keyboardType="decimal-pad"
+                maxLength={6}
+                value={newCardRate}
+                onChangeText={setNewCardRate}
+              />
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Annual fee $"
+                keyboardType="decimal-pad"
+                maxLength={7}
+                value={newCardAnnualFee}
+                onChangeText={setNewCardAnnualFee}
+              />
+              <TextInput
+                style={[styles.input, styles.grow]}
+                placeholder="Foreign fee %"
+                keyboardType="decimal-pad"
+                maxLength={5}
+                value={newCardForeignFee}
+                onChangeText={setNewCardForeignFee}
+              />
+            </View>
+
+            <Text style={styles.faintText}>Bonus category (optional)</Text>
+            <ChipPicker
+              options={[
+                { id: "none", label: "No bonus" },
+                ...merchantCategories.map((category) => ({
+                  id: category,
+                  label: categoryLabels[category]
+                }))
+              ]}
+              selectedId={newCardBonusCategory ?? "none"}
+              onSelect={(id) =>
+                setNewCardBonusCategory(id === "none" ? null : (id as MerchantCategory))
+              }
+            />
+            {newCardBonusCategory ? (
+              <TextInput
+                style={styles.input}
+                placeholder="Bonus rate %"
+                keyboardType="decimal-pad"
+                maxLength={6}
+                value={newCardBonusRate}
+                onChangeText={setNewCardBonusRate}
+              />
+            ) : null}
+
+            <Text style={styles.faintText}>
+              Spending caps and payment-method conditions are not editable here yet; those live in
+              src/data/cards.ts.
+            </Text>
+            <Button label="Add to wallet" onPress={addCustomCard} />
+          </Section>
+
+          <Section label="Annual fees">
+            <View style={styles.spread}>
+              <View style={styles.grow}>
+                <Text style={styles.smallText}>Charge annual fees to every purchase</Text>
+                <Text style={styles.faintText}>
+                  Spreads each card&apos;s annual fee across a year of spend and subtracts it from
+                  the rate. Off by default, because at the single-purchase level a fee card
+                  otherwise looks better than it is.
+                </Text>
+              </View>
+              <Switch
+                value={settings.amortiseAnnualFees}
+                onValueChange={(value) =>
+                  setSettings((prev) => ({ ...prev, amortiseAnnualFees: value }))
+                }
+              />
+            </View>
+            {settings.amortiseAnnualFees ? (
+              <>
+                <Text style={styles.faintText}>Assumed spend per year</Text>
+                <ChipPicker
+                  options={[6000, 12000, 24000, 48000].map((amount) => ({
+                    id: String(amount),
+                    label: formatMoney(amount)
+                  }))}
+                  selectedId={String(settings.assumedAnnualSpend)}
+                  onSelect={(id) =>
+                    setSettings((prev) => ({ ...prev, assumedAnnualSpend: Number(id) }))
+                  }
+                />
+                <Text style={styles.faintText}>
+                  The lower your assumed spend, the more each fee costs per purchase.
+                </Text>
+              </>
+            ) : null}
+          </Section>
+
+          <Section label="Data">
+            <Banner
+              tone="warning"
+              title="Verify before you trust"
+              body="Reward terms change. Every seeded card records the month its rates were checked; confirm against your issuer before relying on a recommendation."
+            />
+            <Button label="Reset all local data" variant="secondary" onPress={resetEverything} />
+          </Section>
         </ScrollView>
       )}
 
       {tab === "history" && (
-        <View style={styles.page}>
+        <View style={[styles.page, { flex: 1 }]}>
           <Text style={styles.sectionLabel}>Decision log</Text>
+          <Text style={styles.faintText}>
+            {decisions.length} entries · {decisions.filter((item) => item.accepted).length} followed
+          </Text>
           <FlatList
             data={decisions}
-            keyExtractor={(item, index) => `${item.timestamp}-${index}`}
+            keyExtractor={(item) => item.id}
+            ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
             renderItem={({ item }) => {
-              const merchant = merchants.find((m) => m.id === item.merchantId);
-              const card = cards.find((c) => c.id === item.bestCardId);
+              const merchant = merchants.find((entry) => entry.id === item.merchantId);
+              const card = cards.find((entry) => entry.id === item.cardId);
               return (
-                <View style={styles.logItem}>
-                  <Text style={styles.favoriteName}>{merchant?.name ?? item.merchantId}</Text>
-                  <Text style={styles.smallText}>{card?.name ?? item.bestCardId}</Text>
-                  <Text style={styles.smallText}>{pct(item.rate)}</Text>
-                  <Text style={styles.smallText}>{item.accepted ? "Accepted" : "Dismissed"}</Text>
+                <View style={styles.listItem}>
+                  <View style={styles.spread}>
+                    <Text style={{ fontWeight: "700", color: colors.ink, flex: 1 }}>
+                      {merchant?.name ?? item.merchantId.replace("adhoc:", "")}
+                    </Text>
+                    <Text style={styles.faintText}>
+                      {new Date(item.timestamp).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  <Text style={styles.smallText}>
+                    {card?.name ?? item.cardId} · {formatRate(item.effectiveRate)}
+                    {item.amount != null ? ` · ${formatMoney(item.amount)}` : ""}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.faintText,
+                      { color: item.accepted ? colors.positive : colors.inkFaint }
+                    ]}
+                  >
+                    {item.accepted ? "Followed the suggestion" : "Used a different card"}
+                  </Text>
                 </View>
               );
             }}
-            ListEmptyComponent={<Text style={styles.smallText}>No events yet.</Text>}
+            ListEmptyComponent={
+              <Text style={styles.smallText}>
+                Nothing logged yet. Tap &ldquo;I used it&rdquo; after a purchase to build a record.
+              </Text>
+            }
           />
         </View>
       )}
     </SafeAreaView>
   );
 }
-
-function HorizontalPicker({
-  options,
-  selectedId,
-  onSelect
-}: {
-  options: { id: string; label: string }[];
-  selectedId: string;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pickerWrap}>
-      {options.map((option) => {
-        const selected = option.id === selectedId;
-        return (
-          <Pressable
-            key={option.id}
-            onPress={() => onSelect(option.id)}
-            style={[styles.pickerOption, selected && styles.pickerOptionActive]}
-          >
-            <Text style={[styles.pickerText, selected && styles.pickerTextActive]}>{option.label}</Text>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
-  );
-}
-
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: "#f8fafc"
-  },
-  header: {
-    paddingHorizontal: 18,
-    paddingTop: 8,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderColor: "#e2e8f0"
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: "700",
-    color: "#0f172a"
-  },
-  subtitle: {
-    fontSize: 13,
-    color: "#334155",
-    marginTop: 3
-  },
-  tabs: {
-    flexDirection: "row",
-    paddingHorizontal: 10,
-    paddingTop: 8,
-    paddingBottom: 2,
-    gap: 8
-  },
-  tabButton: {
-    flex: 1,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-    paddingVertical: 9,
-    alignItems: "center",
-    backgroundColor: "#ffffff"
-  },
-  tabButtonActive: {
-    backgroundColor: "#0f172a",
-    borderColor: "#0f172a"
-  },
-  tabText: {
-    color: "#0f172a",
-    fontWeight: "600",
-    fontSize: 12
-  },
-  tabTextActive: {
-    color: "#f8fafc"
-  },
-  page: {
-    flexGrow: 1,
-    padding: 16,
-    gap: 12
-  },
-  sectionLabel: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#1e293b"
-  },
-  pickerWrap: {
-    flexGrow: 0
-  },
-  pickerOption: {
-    marginRight: 8,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-    backgroundColor: "#ffffff",
-    paddingHorizontal: 14,
-    paddingVertical: 8
-  },
-  pickerOptionActive: {
-    backgroundColor: "#0ea5e9",
-    borderColor: "#0ea5e9"
-  },
-  pickerText: {
-    color: "#0f172a",
-    fontWeight: "500"
-  },
-  pickerTextActive: {
-    color: "#f8fafc",
-    fontWeight: "700"
-  },
-  recommendationCard: {
-    backgroundColor: "#ffffff",
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#e2e8f0",
-    gap: 6
-  },
-  cardHeadline: {
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    color: "#475569"
-  },
-  bestCardName: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#0f172a"
-  },
-  bestRate: {
-    fontSize: 30,
-    fontWeight: "800",
-    color: "#0284c7"
-  },
-  reason: {
-    color: "#334155",
-    lineHeight: 20
-  },
-  smallText: {
-    color: "#475569",
-    lineHeight: 19
-  },
-  row: {
-    flexDirection: "row",
-    gap: 10
-  },
-  primaryButton: {
-    backgroundColor: "#0f172a",
-    borderRadius: 12,
-    paddingVertical: 11,
-    paddingHorizontal: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    flex: 1
-  },
-  primaryButtonText: {
-    color: "#f8fafc",
-    fontWeight: "700"
-  },
-  secondaryButton: {
-    backgroundColor: "#e2e8f0",
-    borderRadius: 12,
-    paddingVertical: 11,
-    paddingHorizontal: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    flex: 1
-  },
-  secondaryButtonText: {
-    color: "#0f172a",
-    fontWeight: "700"
-  },
-  linkButton: {
-    alignSelf: "flex-start",
-    paddingVertical: 4
-  },
-  linkText: {
-    color: "#0284c7",
-    fontWeight: "600"
-  },
-  settingRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 14
-  },
-  settingTextWrap: {
-    flex: 1
-  },
-  favoriteItem: {
-    backgroundColor: "#ffffff",
-    borderColor: "#e2e8f0",
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 12,
-    gap: 4
-  },
-  favoriteItemActive: {
-    borderColor: "#0ea5e9",
-    backgroundColor: "#eff6ff"
-  },
-  favoriteName: {
-    color: "#0f172a",
-    fontWeight: "700"
-  },
-  savedCard: {
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: "#e2e8f0",
-    borderRadius: 14,
-    padding: 12,
-    gap: 3
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-    borderRadius: 12,
-    backgroundColor: "#ffffff",
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  logItem: {
-    borderWidth: 1,
-    borderColor: "#e2e8f0",
-    backgroundColor: "#ffffff",
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
-    gap: 2
-  }
-});

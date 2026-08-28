@@ -1,0 +1,38 @@
+name: check
+
+# The only automated gate on this repo. Runs the same command a contributor
+# runs locally, so a green tick here means typecheck + tests passed.
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run irrelevant.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: typecheck + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` for a reproducible install from the committed lockfile.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and test
+        run: npm run check

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "lib": ["ES2021"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"],
+    "outDir": ".testbuild",
+    "rootDir": "."
+  },
+  "include": [
+    "src/types/**/*.ts",
+    "src/data/**/*.ts",
+    "src/engine/**/*.ts",
+    "src/services/nudgePolicy.ts",
+    "src/services/schema.ts",
+    "tests/**/*.ts"
+  ]
+}
